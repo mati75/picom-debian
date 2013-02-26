@@ -5,7 +5,7 @@ Maintainer: Scott Leggett <scott@sl.id.au>
 Build-Depends: debhelper (>= 9.0.0), hardening-wrapper, libx11-dev,
  libxcomposite-dev, libxdamage-dev, libxfixes-dev, libxext-dev, libxrender-dev,
  libxrandr-dev, pkg-config, libpcre3-dev, libconfig-dev, libdrm-dev,
- libgl1-mesa-dev, libdbus-1-dev, asciidoc
+ libgl1-mesa-dev, libdbus-1-dev, asciidoc, libxml2-utils
 Standards-Version: 3.9.4
 Homepage: https://github.com/chjj/compton
 Vcs-Git: git://github.com/smlx/package-compton.git

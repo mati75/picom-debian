@@ -1,1 +1,7 @@
-https://github.com/chjj/compton/tags .*/v(\d[\d\.]+)\.tar\.gz
+#version=3
+#http://githubredir.debian.net/github/chjj/compton (.*).tar.gz
+
+# Upstream currently does not release tarballs or even tag releases, instead
+# preferring packagers to work straight from git.
+# When this situation improves, the watch lines above should work and this
+# comment block can be removed. See https://github.com/chjj/compton/issues/71

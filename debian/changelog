@@ -1,13 +1,8 @@
-compton (0.0.1+git-e8d854b-2013-01-28-1) UNRELEASED; urgency=low
+compton (0.0.1+git-2182505-2013-02-05-1) UNRELEASED; urgency=low
 
   * Imported Upstream version 0.0.1+git-e8d854b-2013-01-28
   * Updated build and runtime dependencies.
   * Updated build rules to correctly build docs.
-
- -- Scott Leggett <scott@sl.id.au>  Thu, 31 Jan 2013 16:02:46 +1100
-
-compton (0.0.1+20121102.git239796ab-1) unstable; urgency=low
-
   * Initial release (Closes: #679551)
 
- -- Scott Leggett <scott@sl.id.au>  Sat, 03 Nov 2012 02:20:30 +1100
+ -- Scott Leggett <scott@sl.id.au>  Tue, 26 Feb 2013 15:38:46 +1100

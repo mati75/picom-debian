@@ -3,13 +3,12 @@
 
 # Enable build-hardening
 export DEB_BUILD_HARDENING = 1
-export CFLAGS += -O2
 
 # Set binary version
 export COMPTON_VERSION = 0.0.1~git-2182505-2013-02-05
 
 %:
-	dh $@ 
+	dh $@
 
 override_dh_auto_install:
 	make

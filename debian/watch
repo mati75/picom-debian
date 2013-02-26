@@ -1,6 +1,6 @@
 #version=3
-#http://githubredir.debian.net/github/chjj/compton (.*).tar.gz
-
+#https://github.com/chjj/compton/tags .*/v(\d[\d\.]+)\.tar\.gz
+#
 # Upstream currently does not release tarballs or even tag releases, instead
 # preferring packagers to work straight from git.
 # When this situation improves, the watch lines above should work and this

@@ -1,8 +1,7 @@
-compton (0.0.1+git-2182505-2013-02-05-1) UNRELEASED; urgency=low
+compton (0.0.1+git-2182505-2013-02-05-1) experimental; urgency=low
 
-  * Imported Upstream version 0.0.1+git-e8d854b-2013-01-28
-  * Updated build and runtime dependencies.
-  * Updated build rules to correctly build docs.
+  * Imported Upstream version 0.0.1+git-2182505-2013-02-05
+  * Override dh_auto_clean to quiet verbose build warnings.
   * Initial release (Closes: #679551)
 
- -- Scott Leggett <scott@sl.id.au>  Tue, 26 Feb 2013 15:38:46 +1100
+ -- Scott Leggett <scott@sl.id.au>  Tue, 26 Feb 2013 17:13:22 +1100

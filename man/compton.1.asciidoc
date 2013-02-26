@@ -1,0 +1,335 @@
+compton(1)
+==========
+:doctype:     manpage
+:man source:  compton
+:man version: nightly-20121105
+:man manual:  LOCAL USER COMMANDS
+
+NAME
+----
+compton - a compositor for X11
+
+SYNOPSIS
+--------
+*compton* ['OPTIONS']
+
+WARNING
+-------
+This man page may be less up-to-date than the usage text in compton (`compton -h`).
+
+DESCRIPTION
+-----------
+compton is a compositor based on Dana Jansens' version of xcompmgr (which itself was written by Keith Packard). It includes some improvements over the original xcompmgr, like window frame opacity and inactive window transparency.
+
+OPTIONS
+-------
+*-h*, *--help*::
+	Get the usage text embedded in program code, which may be more up-to-date than this man page.
+
+*-d* 'DISPLAY'::
+	Display to be managed.
+
+*-r* 'RADIUS'::
+	The blur radius for shadows, in pixels. (defaults to 12)
+
+*-o* 'OPACITY'::
+	The opacity of shadows. (0.0 - 1.0, defaults to 0.75)
+
+*-l* 'OFFSET'::
+	The left offset for shadows, in pixels. (defaults to -15)
+
+*-t* 'OFFSET'::
+	The top offset for shadows, in pixels. (defaults to -15)
+
+*-I* 'OPACITY_STEP'::
+	Opacity change between steps while fading in. (0.01 - 1.0, defaults to 0.028)
+
+*-O* 'OPACITY_STEP'::
+	Opacity change between steps while fading out. (0.01 - 1.0, defaults to 0.03)
+
+*-D* 'MILLISECONDS'::
+	The time between steps in fade step, in milliseconds. (> 0, defaults to 10)
+
+*-m* 'OPACITY'::
+	Default opacity for dropdown menus and popup menus. (0.0 - 1.0, defaults to 1.0)
+
+*-c*::
+	Enabled client-side shadows on windows. Note desktop windows (windows with '_NET_WM_WINDOW_TYPE_DESKTOP') never get shadow.
+
+*-C*::
+	Avoid drawing shadows on dock/panel windows.
+
+*-z*::
+	Zero the part of the shadow's mask behind the window. Note this may not work properly on ARGB windows with fully transparent areas.
+
+*-f*::
+	Fade windows in/out when opening/closing and when opacity changes, unless *--no-fading-openclose* is used.
+
+*-F*::
+	Equals *-f*. Deprecated.
+
+*-i* 'OPACITY'::
+	Opacity of inactive windows. (0.1 - 1.0, disabled by default)
+
+*-e* 'OPACITY'::
+	Opacity of window titlebars and borders. (0.1 - 1.0, disabled by default)
+
+*-G*::
+	Don't draw shadows on drag-and-drop windows.
+
+*-b*::
+	Daemonize process. Fork to background after initialization.
+
+*-S*::
+	Enable synchronous X operation (for debugging).
+
+*--config* 'PATH'::
+	Look for configuration file at the path. See *CONFIGURATION FILES* section below for where compton looks for a configuration file by default.
+
+*--shadow-red* 'VALUE'::
+	Red color value of shadow (0.0 - 1.0, defaults to 0).
+
+*--shadow-green* 'VALUE'::
+	Green color value of shadow (0.0 - 1.0, defaults to 0).
+
+*--shadow-blue* 'VALUE'::
+	Blue color value of shadow (0.0 - 1.0, defaults to 0).
+
+*--inactive-opacity-override*::
+	Let inactive opacity set by *-i* overrides the windows' '_NET_WM_OPACITY' values.
+
+*--inactive-dim* value::
+	Dim inactive windows. (0.0 - 1.0, defaults to 0.0)
+
+*--mark-wmwin-focused*::
+	Try to detect WM windows and mark them as active.
+
+*--no-fading-openclose*::
+	Do not fade on window open/close.
+
+*--shadow-ignore-shaped*::
+	Do not paint shadows on shaped windows. Note shaped windows here means windows setting its shape through X Shape extension. Those using ARGB background is beyond our control.
+
+*--detect-rounded-corners*::
+	Try to detect windows with rounded corners and don't consider them shaped windows. The accuracy is not very high, unfortunately.
+
+*--detect-client-opacity*::
+	Detect '_NET_WM_OPACITY' on client windows, useful for window managers not passing '_NET_WM_OPACITY' of client windows to frame windows.
+
+*--refresh-rate* 'REFRESH_RATE'::
+	Specify refresh rate of the screen. If not specified or 0, compton will try detecting this with X RandR extension.
+
+*--vsync* 'VSYNC_METHOD'::
+	Set VSync method. There are 3 VSync methods currently available:
++
+--
+* 'none': No VSync
+* 'drm': VSync with 'DRM_IOCTL_WAIT_VBLANK'. May only work on some drivers. Experimental.
+* 'opengl': Try to VSync with 'SGI_swap_control' OpenGL extension. Only work on some drivers. Experimental.
+* 'opengl-oml': Try to VSync with 'OML_sync_control' OpenGL extension. Only work on some drivers. Experimental.
+
+(Note some VSync methods may not be enabled at compile time.)
+--
+
+*--alpha-step* 'VALUE'::
+	Step for pregenerating alpha pictures. (0.01 - 1.0, defaults to 0.03)
+
+*--dbe*::
+	Enable DBE painting mode, intended to use with VSync to (hopefully) eliminate tearing. Reported to have no effect, though.
+
+*--paint-on-overlay*::
+	Painting on X Composite overlay window instead of on root window.
+
+*--sw-opti*::
+	Limit compton to repaint at most once every 1 / 'refresh_rate' second to boost performance. Experimental. This should not be used with *--vsync* as *--vsync* essentially does *--sw-opti*'s job already, unless you wish to specify a lower refresh rate than the actual value.
+
+*--use-ewmh-active-win*::
+	Use EWMH '_NET_ACTIVE_WINDOW' to determine currently focused window, rather than listening to 'FocusIn'/'FocusOut' event. Might have more accuracy, provided that the WM supports it. Experimental.
+
+*--unredir-if-possible*::
+	Unredirect all windows if a full-screen opaque window is detected, to maximize performance for full-screen windows. Known to cause flickering when redirecting/unredirecting windows. *--paint-on-overlay* may make the flickering less obvious. Experimental.
+
+*--shadow-exclude* 'CONDITION'::
+	Specify a list of conditions of windows that should have no shadow.
+
+*--focus-exclude* 'CONDITION'::
+	Specify a list of conditions of windows that should always be considered focused.
+
+*--inactive-dim-fixed*::
+	Use fixed inactive dim value, instead of adjusting according to window opacity.
+
+*--detect-transient*::
+	Use 'WM_TRANSIENT_FOR' to group windows, and consider windows in the same group focused at the same time.
+
+*--detect-client-leader*::
+	Use 'WM_CLIENT_LEADER' to group windows, and consider windows in the same group focused at the same time. 'WM_TRANSIENT_FOR' has higher priority if *--detect-transient* is enabled, too.
+
+*--blur-background*::
+	Blur background of semi-transparent / ARGB windows. Bad in performance, with driver-dependent behavior. The name of the switch may change without prior notifications.
+
+*--blur-background-frame*::
+	Blur background of windows when the window frame is not opaque.  Implies *--blur-background*. Bad in performance, with driver-dependent behavior. The name may change.
+
+*--blur-background-fixed*::
+	Use fixed blur strength rather than adjusting according to window opacity.
+
+*--invert-color-include* condition::
+	Specify a list of conditions of windows that should be painted with inverted color. Resource-hogging, and is not well tested.
+
+*--dbus*::
+	Enable remote control via D-Bus. See the *D-BUS API* section below for more details.
+
+FORMAT OF CONDITIONS
+--------------------
+Some options accept a condition string to match certain windows. A condition string is formed by one or more conditions, joined by logical operators.
+
+A condition with "exists" operator looks like this:
+
+	<NEGATION> <TARGET> <CLIENT/FRAME> [<INDEX>] : <FORMAT> <TYPE>
+
+With equals operator it looks like:
+
+	<NEGATION> <TARGET> <CLIENT/FRAME> [<INDEX>] : <FORMAT> <TYPE> <NEGATION> <OP QUALIFIER> <MATCH TYPE> = <PATTERN>
+
+With greater-than/less-than operators it looks like:
+
+	<NEGATION> <TARGET> <CLIENT/FRAME> [<INDEX>] : <FORMAT> <TYPE> <NEGATION> <OPERATOR> <PATTERN>
+
+'NEGATION' (optional) is one or more exclamation marks;
+
+'TARGET' is either a predefined target name, or the name of a window property to match. Supported predefined targets are `id`, `override_redirect`, `focused`, `wmwin`, `client` (ID of client window), `window_type` (window type in string), `leader` (ID of window leader), `name`, `class_g` (= `WM_CLASS[1]`), `class_i` (= `WM_CLASS[0]`), and `role`.
+
+'CLIENT/FRAME' is a single `@` if the window attribute should be be looked up on client window, nothing if on frame window;
+
+'INDEX' (optional) is the index number of the property to look up. For example, `[2]` means look at the third value in the property. Do not specify it for predefined targets.
+
+'FORMAT' (optional) specifies the format of the property, 8, 16, or 32. On absence we use format X reports. Do not specify it for predefined or string targets.
+
+'TYPE' is a single character representing the type of the property to match for: `c` for 'CARDINAL', `a` for 'ATOM', `w` for 'WINDOW', `d` for 'DRAWABLE', `s` for 'STRING' (and any other string types, such as 'UTF8_STRING'). Do not specify it for predefined targets.
+
+'OP QUALIFIER' (optional), applicable only for equals operator, could be `?` (ignore-case).
+
+'MATCH TYPE' (optional), applicable only for equals operator, could be nothing (exact match), `*` (match anywhere), `^` (match from start), `%` (wildcard), or `~` (PCRE regular expression).
+
+'OPERATOR' is one of `=` (equals), `<`, `>`, `<=`, `=>`, or nothing (exists). Exists operator checks whether a property exists on a window (but for predefined targets, exists means != 0 then).
+
+'PATTERN' is either an integer or a string enclosed by single or double quotes. Python-3-style escape sequences and raw string are supported in the string format.
+
+Supported logical operators are `&&` (and) and `||` (or). `&&` has higher precedence than `||`, left-to-right associativity. Use parentheses to change precedence.
+
+Examples:
+
+	# If the window is focused
+	focused
+	focused = 1
+	# If the window is not override-redirected
+	!override_redirect
+	override_redirect = false
+	override_redirect != true
+	override_redirect != 1
+	# If the window is a menu
+	window_type *= "menu"
+	_NET_WM_WINDOW_TYPE@:a *= "MENU"
+	# If the window name contains "Firefox", ignore case
+	name *?= "Firefox"
+	_NET_WM_NAME@:s *?= "Firefox"
+	# If the window name ends with "Firefox"
+	name %= "*Firefox"
+	name ~= "Firefox$"
+	# If the window has a property _COMPTON_SHADOW with value 0, type CARDINAL,
+	# format 32, value 0, on its frame window
+	_COMPTON_SHADOW:32c = 0
+	# If the third value of _NET_FRAME_EXTENTS is less than 20, or there's no
+	# _NET_FRAME_EXTENTS property on client window
+	_NET_FRAME_EXTENTS@[2]:32c < 20 || !_NET_FRAME_EXTENTS@:32c
+	# The pattern here will be parsed as "dd4"
+	name = "\x64\x64\o64"
+	# The pattern here will be parsed as "\x64\x64\x64"
+	name = r"\x64\x64\o64"
+
+
+LEGACY FORMAT OF CONDITIONS
+---------------------------
+
+This is the old condition format we once used. Support of this format might be removed in the future.
+
+	condition = TARGET:TYPE[FLAGS]:PATTERN
+
+'TARGET' is one of "n" (window name), "i" (window class instance), "g" (window general class), and "r" (window role).
+
+'TYPE' is one of "e" (exact match), "a" (match anywhere), "s" (match from start), "w" (wildcard), and "p" (PCRE regular expressions, if compiled with the support).
+
+'FLAGS' could be a series of flags. Currently the only defined flag is "i" (ignore case).
+
+'PATTERN' is the actual pattern string.
+
+CONFIGURATION FILES
+-------------------
+compton could read from a configuration file if libconfig support is compiled in. If *--config* is not used, compton will seek for a configuration file in `$XDG_CONFIG_HOME/compton.conf` (`~/.config/compton.conf`, usually), then `~/.compton.conf`, then `compton.conf` under `$XDG_DATA_DIRS` (often `/etc/xdg/compton.conf`). Most commandline switches could be replaced with an option in configuration file, and some options are exposed only in configuration files (presently, some window-type-specific settings). compton uses general libconfig configurtion file format. A sample configuration file is available as `compton.sample.conf` in the source tree.
+
+SIGNALS
+-------
+
+* compton reinitializes itself upon receiving `SIGUSR1`.
+
+D-BUS API
+---------
+
+It's possible to control compton via D-Bus messages, by running compton with *--dbus* and send messages to `com.github.chjj.compton.<DISPLAY>`. `<DISPLAY>` is the display used by compton, with all non-alphanumeric characters transformed to underscores. For `DISPLAY=:0.0` you should use `com.github.chjj.compton._0_0`, for example.
+
+The D-Bus methods and signals are not yet stable, thus undocumented right now.
+
+EXAMPLES
+--------
+
+* Disable configuration file parsing:
++
+------------
+$ compton --config /dev/null
+------------
+
+* Run compton with client-side shadow and fading, disable shadow on dock windows and drag-and-drop windows:
++
+------------
+$ compton -cCGf
+------------
+
+* Same thing as above, plus making inactive windows 80% transparent, making frame 80% transparent, don't fade on window open/close, enable software optimization, and fork to background:
++
+------------
+$ compton -bcCGf -i 0.8 -e 0.8 --no-fading-openclose --sw-opti
+------------
+
+* Draw white shadows:
++
+------------
+$ compton -c --shadow-red 1 --shadow-green 1 --shadow-blue 1
+------------
+
+* Avoid drawing shadows on wbar window:
++
+------------
+$ compton -c --shadow-exclude 'class_g = "wbar"'
+------------
+
+* Enable OpenGL vsync:
++
+------------
+$ compton --vsync opengl
+------------
+
+BUGS
+----
+Please report any you find to <https://github.com/chjj/compton> .
+
+AUTHORS
+-------
+xcompmgr, originally written by Keith Packard, with contributions from Matthew Allum, Eric Anholt, Dan Doel, Thomas Luebking, Matthew Hawn, Ely Levy, Phil Blundell, and Carl Worth. Compton by Christopher Jeffrey, based on Dana Jansens' original work, with contributions from Richard Grenville.
+
+RESOURCES
+---------
+Homepage: <https://github.com/chjj/compton>
+
+SEE ALSO
+--------
+*xcompmgr*(1), link:compton-trans.html[*compton-trans*(1)]

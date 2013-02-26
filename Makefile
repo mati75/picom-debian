@@ -1,0 +1,123 @@
+# Use tab to indent recipe lines, spaces to indent other lines, otherwise
+# GNU make may get unhappy.
+
+CC ?= gcc
+
+PREFIX ?= /usr
+BINDIR ?= $(PREFIX)/bin
+MANDIR ?= $(PREFIX)/share/man/man1
+
+PACKAGES = x11 xcomposite xfixes xdamage xrender xext xrandr
+LIBS = -lm -lrt
+INCS =
+
+OBJS = compton.o
+
+# === Configuration flags ===
+CFG = -std=c99
+
+# ==== libconfig ====
+ifeq "$(NO_LIBCONFIG)" ""
+  CFG += -DCONFIG_LIBCONFIG
+  PACKAGES += libconfig
+
+  # libconfig-1.3* does not define LIBCONFIG_VER* macros, so we use
+  # pkg-config to determine its version here
+  CFG += $(shell pkg-config --atleast-version=1.4 libconfig || echo '-DCONFIG_LIBCONFIG_LEGACY')
+endif
+
+# ==== PCRE regular expression ====
+ifeq "$(NO_REGEX_PCRE)" ""
+  CFG += -DCONFIG_REGEX_PCRE
+  LIBS += $(shell pcre-config --libs)
+  INCS += $(shell pcre-config --cflags)
+  ifeq "$(NO_REGEX_PCRE_JIT)" ""
+    CFG += -DCONFIG_REGEX_PCRE_JIT
+  endif
+endif
+
+# ==== DRM VSync ====
+ifeq "$(NO_VSYNC_DRM)" ""
+  CFG += -DCONFIG_VSYNC_DRM
+endif
+
+# ==== OpenGL VSync ====
+ifeq "$(NO_VSYNC_OPENGL)" ""
+  CFG += -DCONFIG_VSYNC_OPENGL
+  # -lGL must precede some other libraries, or it segfaults on FreeBSD (#74)
+  LIBS := -lGL $(LIBS)
+endif
+
+# ==== D-Bus ====
+ifeq "$(NO_DBUS)" ""
+  CFG += -DCONFIG_DBUS
+  PACKAGES += dbus-1
+  OBJS += dbus.o
+endif
+
+# ==== C2 ====
+ifeq "$(NO_C2)" ""
+  CFG += -DCONFIG_C2
+  OBJS += c2.o
+endif
+
+# === Version string ===
+COMPTON_VERSION ?= git-$(shell git describe --always --dirty)-$(shell git log -1 --date=short --pretty=format:%cd)
+CFG += -DCOMPTON_VERSION="\"$(COMPTON_VERSION)\""
+
+LDFLAGS ?= -Wl,-O1 -Wl,--as-needed
+CFLAGS ?= -DNDEBUG -O2 -D_FORTIFY_SOURCE=2
+
+LIBS += $(shell pkg-config --libs $(PACKAGES))
+INCS += $(shell pkg-config --cflags $(PACKAGES))
+
+CFLAGS += -Wall
+
+BINS = compton bin/compton-trans
+MANPAGES = man/compton.1 man/compton-trans.1
+MANPAGES_HTML = $(addsuffix .html,$(MANPAGES))
+
+# === Recipes ===
+.DEFAULT_GOAL := compton
+
+src/.clang_complete: Makefile
+	@(for i in $(filter-out -O% -DNDEBUG, $(CFG) $(CFLAGS) $(INCS)); do echo "$$i"; done) > $@
+
+%.o: src/%.c src/%.h src/common.h
+	$(CC) $(CFG) $(CFLAGS) $(INCS) -c src/$*.c
+
+compton: $(OBJS)
+	$(CC) $(CFG) $(LDFLAGS) $(CFLAGS) -o $@ $(OBJS) $(LIBS)
+
+man/%.1: man/%.1.asciidoc
+	a2x --format manpage $<
+
+man/%.1.html: man/%.1.asciidoc
+	asciidoc $<
+
+docs: $(MANPAGES) $(MANPAGES_HTML)
+
+install: $(BINS) docs
+	@install -d "$(DESTDIR)$(BINDIR)" "$(DESTDIR)$(MANDIR)"
+	@install -m755 $(BINS) "$(DESTDIR)$(BINDIR)"/ 
+	@install -m644 $(MANPAGES) "$(DESTDIR)$(MANDIR)"/
+ifneq "$(DOCDIR)" ""
+	@install -d "$(DESTDIR)$(DOCDIR)"
+	@install -m644 README.md compton.sample.conf "$(DESTDIR)$(DOCDIR)"/
+	@install -m755 dbus-examples/cdbus-driver.sh "$(DESTDIR)$(DOCDIR)"/
+endif
+
+uninstall:
+	@rm -f "$(DESTDIR)$(BINDIR)/compton" "$(DESTDIR)$(BINDIR)/compton-trans"
+	@rm -f $(addprefix "$(DESTDIR)$(MANDIR)"/, compton.1 compton-trans.1)
+ifneq "$(DOCDIR)" ""
+	@rm -f $(addprefix "$(DESTDIR)$(DOCDIR)"/, README.md compton.sample.conf cdbus-driver.sh)
+endif
+
+clean:
+	@rm -f $(OBJS) compton $(MANPAGES) $(MANPAGES_HTML) .clang_complete
+
+version:
+	@echo "$(COMPTON_VERSION)"
+
+.PHONY: uninstall clean docs version

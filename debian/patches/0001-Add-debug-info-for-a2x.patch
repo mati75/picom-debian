@@ -7,7 +7,7 @@ Subject: Add debug info for a2x.
  1 file changed, 1 insertion(+), 1 deletion(-)
 
 diff --git a/Makefile b/Makefile
-index 96ab25d..f2f799e 100644
+index 96ab25d..b2da015 100644
 --- a/Makefile
 +++ b/Makefile
 @@ -90,7 +90,7 @@ compton: $(OBJS)
@@ -15,7 +15,7 @@ index 96ab25d..f2f799e 100644
  
  man/%.1: man/%.1.asciidoc
 -	a2x --format manpage $<
-+	a2x --debug --format manpage $<
++	a2x -vv --format manpage $<
  
  man/%.1.html: man/%.1.asciidoc
  	asciidoc $<

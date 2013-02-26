@@ -1,0 +1,21 @@
+From: Scott Leggett <scott@sl.id.au>
+Date: Tue, 26 Feb 2013 15:13:09 +1100
+Subject: Don't check for libconfig.
+
+---
+ Makefile |    2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/Makefile b/Makefile
+index 96ab25d..13a9227 100644
+--- a/Makefile
++++ b/Makefile
+@@ -23,7 +23,7 @@ ifeq "$(NO_LIBCONFIG)" ""
+ 
+   # libconfig-1.3* does not define LIBCONFIG_VER* macros, so we use
+   # pkg-config to determine its version here
+-  CFG += $(shell pkg-config --atleast-version=1.4 libconfig || echo '-DCONFIG_LIBCONFIG_LEGACY')
++  #CFG += $(shell pkg-config --atleast-version=1.4 libconfig || echo '-DCONFIG_LIBCONFIG_LEGACY')
+ endif
+ 
+ # ==== PCRE regular expression ====

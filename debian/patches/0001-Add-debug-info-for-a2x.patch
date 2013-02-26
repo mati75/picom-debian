@@ -1,0 +1,21 @@
+From: Scott Leggett <scott@sl.id.au>
+Date: Tue, 26 Feb 2013 16:17:08 +1100
+Subject: Add debug info for a2x.
+
+---
+ Makefile |    2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/Makefile b/Makefile
+index 96ab25d..f2f799e 100644
+--- a/Makefile
++++ b/Makefile
+@@ -90,7 +90,7 @@ compton: $(OBJS)
+ 	$(CC) $(CFG) $(LDFLAGS) $(CFLAGS) -o $@ $(OBJS) $(LIBS)
+ 
+ man/%.1: man/%.1.asciidoc
+-	a2x --format manpage $<
++	a2x --debug --format manpage $<
+ 
+ man/%.1.html: man/%.1.asciidoc
+ 	asciidoc $<

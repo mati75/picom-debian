@@ -1,7 +1,7 @@
-compton (0.0.1+git-2182505-2013-02-05-1) experimental; urgency=low
+compton (0.0.1+git-b3652f6-2013-03-03-1) experimental; urgency=low
 
-  * Imported Upstream version 0.0.1+git-2182505-2013-02-05
+  * Imported Upstream version 0.0.1+git-b3652f6-2013-03-03
   * Override dh_auto_clean to quiet verbose build warnings.
   * Initial release (Closes: #679551)
 
- -- Scott Leggett <scott@sl.id.au>  Tue, 26 Feb 2013 17:13:22 +1100
+ -- Scott Leggett <scott@sl.id.au>  Sun, 10 Mar 2013 15:08:58 +1100

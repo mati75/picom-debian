@@ -5,7 +5,7 @@
 export DEB_BUILD_HARDENING = 1
 
 # Set binary version
-export COMPTON_VERSION = 0.0.1+git-b3652f6-2013-03-03
+export COMPTON_VERSION = 0.0.1+git-85e7d18-2013-04-21
 
 %:
 	dh $@

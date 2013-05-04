@@ -1042,6 +1042,7 @@ c2_match_once_leaf(session_t *ps, win *w, const c2_l_t *pleaf,
           switch (pleaf->predef) {
             case C2_L_PID:      tgt = wid;                      break;
             case C2_L_POVREDIR: tgt = w->a.override_redirect;   break;
+            case C2_L_PARGB:    tgt = (WMODE_ARGB == w->mode);  break;
             case C2_L_PFOCUSED: tgt = w->focused_real;          break;
             case C2_L_PWMWIN:   tgt = w->wmwin;                 break;
             case C2_L_PCLIENT:  tgt = w->client_win;            break;
@@ -1182,7 +1183,7 @@ c2_match_once_leaf(session_t *ps, win *w, const c2_l_t *pleaf,
         // Free the string after usage, if necessary
         if (tgt_free) {
           if (C2_L_TATOM == pleaf->type)
-            XFree(tgt_free);
+            cxfree(tgt_free);
           else
             free(tgt_free);
         }

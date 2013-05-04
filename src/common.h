@@ -76,6 +76,12 @@
 #include <X11/extensions/Xrandr.h>
 #include <X11/extensions/Xdbe.h>
 
+// Workarounds for missing definitions in very old versions of X headers,
+// thanks to consolers for reporting
+#ifndef PictOpDifference
+#define PictOpDifference 0x39
+#endif
+
 // libconfig
 #ifdef CONFIG_LIBCONFIG
 #include <libgen.h>
@@ -89,7 +95,18 @@
 
 // libGL
 #ifdef CONFIG_VSYNC_OPENGL
+#ifdef CONFIG_VSYNC_OPENGL_GLSL
+#define GL_GLEXT_PROTOTYPES
+#endif
+
 #include <GL/glx.h>
+
+// Workarounds for missing definitions in some broken GL drivers, thanks to
+// douglasp and consolers for reporting
+#ifndef GL_TEXTURE_RECTANGLE
+#define GL_TEXTURE_RECTANGLE 0x84F5
+#endif
+
 #endif
 
 // === Macros ===
@@ -130,6 +147,9 @@
 #error libXcomposite version unsupported
 #endif
 
+/// @brief Length of generic buffers.
+#define BUF_LEN 80
+
 #define ROUNDED_PERCENT 0.05
 #define ROUNDED_PIXELS  10
 
@@ -151,6 +171,9 @@
 #define XRFILTER_CONVOLUTION  "convolution"
 #define XRFILTER_GUASSIAN     "gaussian"
 #define XRFILTER_BINOMIAL     "binomial"
+
+/// @brief Maximum OpenGL FBConfig depth.
+#define OPENGL_MAX_DEPTH 32
 
 // Window flags
 
@@ -249,8 +272,27 @@ typedef enum {
   VSYNC_DRM,
   VSYNC_OPENGL,
   VSYNC_OPENGL_OML,
+  VSYNC_OPENGL_SWC,
+  VSYNC_OPENGL_MSWC,
   NUM_VSYNC,
 } vsync_t;
+
+/// @brief Possible backends of compton.
+enum backend {
+  BKEND_XRENDER,
+  BKEND_GLX,
+  NUM_BKEND,
+};
+
+/// @brief Possible swap methods.
+enum glx_swap_method {
+  SWAPM_UNDEFINED,
+  SWAPM_EXCHANGE,
+  SWAPM_COPY,
+  NUM_SWAPM,
+};
+
+typedef struct _glx_texture glx_texture_t;
 
 #ifdef CONFIG_VSYNC_OPENGL
 typedef int (*f_WaitVideoSync) (int, int, unsigned *);
@@ -259,14 +301,42 @@ typedef int (*f_GetVideoSync) (unsigned *);
 typedef Bool (*f_GetSyncValuesOML) (Display* dpy, GLXDrawable drawable, int64_t* ust, int64_t* msc, int64_t* sbc);
 typedef Bool (*f_WaitForMscOML) (Display* dpy, GLXDrawable drawable, int64_t target_msc, int64_t divisor, int64_t remainder, int64_t* ust, int64_t* msc, int64_t* sbc);
 
+typedef int (*f_SwapIntervalSGI) (int interval);
+typedef int (*f_SwapIntervalMESA) (unsigned int interval);
+
 typedef void (*f_BindTexImageEXT) (Display *display, GLXDrawable drawable, int buffer, const int *attrib_list);
 typedef void (*f_ReleaseTexImageEXT) (Display *display, GLXDrawable drawable, int buffer);
 
-struct glx_fbconfig {
+typedef void (*f_CopySubBuffer) (Display *dpy, GLXDrawable drawable, int x, int y, int width, int height);
+
+/// @brief Wrapper of a GLX FBConfig.
+typedef struct {
   GLXFBConfig cfg;
+  GLint texture_fmt;
+  GLint texture_tgts;
+  bool y_inverted;
+} glx_fbconfig_t;
+
+/// @brief Wrapper of a binded GLX texture.
+struct _glx_texture {
+  GLuint texture;
+  GLXPixmap glpixmap;
+  Pixmap pixmap;
+  GLenum target;
+  unsigned width;
+  unsigned height;
+  unsigned depth;
   bool y_inverted;
 };
 #endif
+
+typedef struct {
+  Pixmap pixmap;
+  Picture pict;
+  glx_texture_t *ptex;
+} paint_t;
+
+#define PAINT_INIT { .pixmap = None, .pict = None }
 
 typedef struct {
   int size;
@@ -278,6 +348,14 @@ typedef struct _latom {
   Atom atom;
   struct _latom *next;
 } latom_t;
+
+/// A representation of raw region data
+typedef struct {
+  XRectangle *rects;
+  int nrects;
+} reg_data_t;
+
+#define REG_DATA_INIT { NULL, 0 }
 
 struct _timeout_t;
 
@@ -293,6 +371,19 @@ typedef struct {
   /// The display name we used. NULL means we are using the value of the
   /// <code>DISPLAY</code> environment variable.
   char *display;
+  /// The backend in use.
+  enum backend backend;
+  /// Whether to avoid using stencil buffer under GLX backend. Might be
+  /// unsafe.
+  bool glx_no_stencil;
+  /// Whether to copy unmodified regions from front buffer.
+  bool glx_copy_from_front;
+  /// Whether to use glXCopySubBufferMESA() to update screen.
+  bool glx_use_copysubbuffermesa;
+  /// Whether to avoid rebinding pixmap on window damage.
+  bool glx_no_rebind_pixmap;
+  /// GLX swap method we assume OpenGL uses.
+  enum glx_swap_method glx_swap_method;
   /// Whether to try to detect WM windows and mark them as focused.
   bool mark_wmwin_focused;
   /// Whether to mark override-redirect windows as focused.
@@ -311,6 +402,10 @@ typedef struct {
   bool dbus;
   /// Path to log file.
   char *logpath;
+  /// Number of cycles to paint in benchmark mode. 0 for disabled.
+  int benchmark;
+  /// Window to constantly repaint in benchmark mode. 0 for full-screen.
+  Window benchmark_wid;
   /// Whether to work under synchronized mode for debugging.
   bool synchronize;
 
@@ -363,6 +458,8 @@ typedef struct {
   /// 32-bit integer with the format of _NET_WM_OPACITY. 0 stands for
   /// not enabled, default.
   opacity_t inactive_opacity;
+  /// Default opacity for inactive windows.
+  opacity_t active_opacity;
   /// Whether inactive_opacity overrides the opacity set by window
   /// attributes.
   bool inactive_opacity_override;
@@ -384,6 +481,8 @@ typedef struct {
   /// Whether to use fixed blur strength instead of adjusting according
   /// to window opacity.
   bool blur_background_fixed;
+  /// Background blur blacklist. A linked list of conditions.
+  c2_lptr_t *blur_background_blacklist;
   /// How much to dim an inactive window. 0.0 - 1.0, 0 to disable.
   double inactive_dim;
   /// Whether to use fixed inactive dim opacity, instead of deciding
@@ -434,8 +533,10 @@ typedef struct {
   // Damage root_damage;
   /// X Composite overlay window. Used if <code>--paint-on-overlay</code>.
   Window overlay;
+  /// Whether the root tile is filled by compton.
+  bool root_tile_fill;
   /// Picture of the root window background.
-  Picture root_tile;
+  paint_t root_tile_paint;
   /// A region of the size of the screen.
   XserverRegion screen_reg;
   /// Picture of root window. Destination of painting in no-DBE painting
@@ -472,6 +573,8 @@ typedef struct {
   struct timeval time_start;
   /// The region needs to painted on next paint.
   XserverRegion all_damage;
+  /// The region damaged on the last paint.
+  XserverRegion all_damage_last;
   /// Whether all windows are currently redirected.
   bool redirected;
   /// Whether there's a highest full-screen window, and all windows could
@@ -488,6 +591,10 @@ typedef struct {
   /// Pointer to the <code>next</code> member of tail element of the error
   /// ignore linked list.
   ignore_t **ignore_tail;
+#ifdef CONFIG_VSYNC_OPENGL
+  /// Current GLX Z value.
+  int glx_z;
+#endif
   /// Reset program after next paint.
   bool reset;
 
@@ -547,22 +654,40 @@ typedef struct {
   // === OpenGL related ===
   /// GLX context.
   GLXContext glx_context;
+  /// Whether we have GL_ARB_texture_non_power_of_two.
+  bool glx_has_texture_non_power_of_two;
   /// Pointer to glXGetVideoSyncSGI function.
   f_GetVideoSync glXGetVideoSyncSGI;
   /// Pointer to glXWaitVideoSyncSGI function.
   f_WaitVideoSync glXWaitVideoSyncSGI;
-  /// Pointer to glXGetSyncValuesOML function.
+   /// Pointer to glXGetSyncValuesOML function.
   f_GetSyncValuesOML glXGetSyncValuesOML;
   /// Pointer to glXWaitForMscOML function.
   f_WaitForMscOML glXWaitForMscOML;
+  /// Pointer to glXSwapIntervalSGI function.
+  f_SwapIntervalSGI glXSwapIntervalProc;
+  /// Pointer to glXSwapIntervalMESA function.
+  f_SwapIntervalMESA glXSwapIntervalMESAProc;
   /// Pointer to glXBindTexImageEXT function.
-  f_BindTexImageEXT glXBindTexImageEXT;
+  f_BindTexImageEXT glXBindTexImageProc;
   /// Pointer to glXReleaseTexImageEXT function.
-  f_ReleaseTexImageEXT glXReleaseTexImageEXT;
-  /// FBConfig for RGB GLX pixmap.
-  struct glx_fbconfig *glx_fbconfig_rgb;
-  /// FBConfig for RGBA GLX pixmap.
-  struct glx_fbconfig *glx_fbconfig_rgba;
+  f_ReleaseTexImageEXT glXReleaseTexImageProc;
+  /// Pointer to glXCopySubBufferMESA function.
+  f_CopySubBuffer glXCopySubBufferProc;
+  /// FBConfig-s for GLX pixmap of different depths.
+  glx_fbconfig_t *glx_fbconfigs[OPENGL_MAX_DEPTH + 1];
+#ifdef CONFIG_VSYNC_OPENGL_GLSL
+  /// Fragment shader for blur.
+  GLuint glx_frag_shader_blur;
+  /// GLSL program for blur.
+  GLuint glx_prog_blur;
+  /// Location of uniform "offset_x" in blur GLSL program.
+  GLint glx_prog_blur_unifm_offset_x;
+  /// Location of uniform "offset_y" in blur GLSL program.
+  GLint glx_prog_blur_unifm_offset_y;
+  /// Location of uniform "factor_center" in blur GLSL program.
+  GLint glx_prog_blur_unifm_factor_center;
+#endif
 #endif
 
   // === X extension related ===
@@ -664,16 +789,18 @@ typedef struct _win {
   Window id;
   /// Window attributes.
   XWindowAttributes a;
+  /// Window visual pict format;
+  XRenderPictFormat *pictfmt;
   /// Window painting mode.
   winmode_t mode;
   /// Whether the window has been damaged at least once.
   bool damaged;
+  /// Whether the window was damaged after last paint.
+  bool pixmap_damaged;
   /// Damage of the window.
   Damage damage;
-  /// NameWindowPixmap of the window.
-  Pixmap pixmap;
-  /// Picture of the window.
-  Picture picture;
+  /// Paint info of the window.
+  paint_t paint;
   /// Bounding shape of the window.
   XserverRegion border_size;
   /// Region of the whole window, shadow region included.
@@ -738,6 +865,7 @@ typedef struct _win {
   const c2_lptr_t *cache_fblst;
   const c2_lptr_t *cache_fcblst;
   const c2_lptr_t *cache_ivclst;
+  const c2_lptr_t *cache_bbblst;
 
   // Opacity-related members
   /// Current window opacity.
@@ -750,8 +878,6 @@ typedef struct _win {
   /// broken window managers not transferring client window's
   /// _NET_WM_OPACITY value
   opacity_t opacity_prop_client;
-  /// Alpha mask Picture to render window with opacity.
-  Picture alpha_pict;
 
   // Fading-related members
   /// Do not fade if it's false. Change on window type change.
@@ -763,8 +889,6 @@ typedef struct _win {
   // Frame-opacity-related members
   /// Current window frame opacity. Affected by window opacity.
   double frame_opacity;
-  /// Alpha mask Picture to render window frame with opacity.
-  Picture frame_alpha_pict;
   /// Frame widths. Determined by client window attributes.
   unsigned int left_width, right_width, top_width, bottom_width;
 
@@ -784,9 +908,7 @@ typedef struct _win {
   /// Height of shadow. Affected by window size and commandline argument.
   int shadow_height;
   /// Picture to render shadow. Affected by window size.
-  Picture shadow_pict;
-  /// Alpha mask Picture to render shadow. Affected by shadow opacity.
-  Picture shadow_alpha_pict;
+  paint_t shadow_paint;
   /// The value of _COMPTON_SHADOW attribute of the window. Below 0 for
   /// none.
   long prop_shadow;
@@ -794,15 +916,15 @@ typedef struct _win {
   // Dim-related members
   /// Whether the window is to be dimmed.
   bool dim;
-  /// Picture for dimming. Affected by user-specified inactive dim
-  /// opacity and window opacity.
-  Picture dim_alpha_pict;
 
   /// Whether to invert window color.
   bool invert_color;
   /// Override value of window color inversion state. Set by D-Bus method
   /// calls.
   switch_t invert_color_force;
+
+  /// Whether to blur window background.
+  bool blur_background;
 } win;
 
 /// Temporary structure used for communication between
@@ -832,7 +954,9 @@ typedef enum {
 } win_evmode_t;
 
 extern const char * const WINTYPES[NUM_WINTYPES];
-extern const char * const VSYNC_STRS[NUM_VSYNC];
+extern const char * const VSYNC_STRS[NUM_VSYNC + 1];
+extern const char * const BACKEND_STRS[NUM_BKEND + 1];
+extern const char * const GLX_SWAP_METHODS_STRS[NUM_SWAPM + 1];
 extern session_t *ps_g;
 
 // == Debugging code ==
@@ -895,6 +1019,20 @@ XFixesDestroyRegion_(Display *dpy, XserverRegion reg,
 #endif
 
 // === Functions ===
+
+/**
+ * @brief Quit if the passed-in pointer is empty.
+ */
+static inline void
+allocchk_(const char *func_name, void *ptr) {
+  if (!ptr) {
+    printf_err("%s(): Failed to allocate memory.", func_name);
+    exit(1);
+  }
+}
+
+/// @brief Wrapper of allocchk_().
+#define allocchk(ptr) allocchk_(__func__, ptr)
 
 /**
  * Return whether a struct timeval value is empty.
@@ -1188,12 +1326,41 @@ normalize_d(double d) {
  */
 static inline bool
 parse_vsync(session_t *ps, const char *str) {
-  for (vsync_t i = 0; i < (sizeof(VSYNC_STRS) / sizeof(VSYNC_STRS[0])); ++i)
+  for (vsync_t i = 0; VSYNC_STRS[i]; ++i)
     if (!strcasecmp(str, VSYNC_STRS[i])) {
       ps->o.vsync = i;
       return true;
     }
+
   printf_errf("(\"%s\"): Invalid vsync argument.", str);
+  return false;
+}
+
+/**
+ * Parse a backend option argument.
+ */
+static inline bool
+parse_backend(session_t *ps, const char *str) {
+  for (enum backend i = 0; BACKEND_STRS[i]; ++i)
+    if (!strcasecmp(str, BACKEND_STRS[i])) {
+      ps->o.backend = i;
+      return true;
+    }
+  printf_errf("(\"%s\"): Invalid backend argument.", str);
+  return false;
+}
+
+/**
+ * Parse a glx_swap_method option argument.
+ */
+static inline bool
+parse_glx_swap_method(session_t *ps, const char *str) {
+  for (enum glx_swap_method i = 0; GLX_SWAP_METHODS_STRS[i]; ++i)
+    if (!strcasecmp(str, GLX_SWAP_METHODS_STRS[i])) {
+      ps->o.glx_swap_method = i;
+      return true;
+    }
+  printf_errf("(\"%s\"): Invalid GLX swap method argument.", str);
   return false;
 }
 
@@ -1297,11 +1464,30 @@ fds_poll(session_t *ps, struct timeval *ptv) {
 #undef CPY_FDS
 
 /**
+ * Wrapper of XFree() for convenience.
+ *
+ * Because a NULL pointer cannot be passed to XFree(), its man page says.
+ */
+static inline void
+cxfree(void *data) {
+  if (data)
+    XFree(data);
+}
+
+/**
  * Wrapper of XInternAtom() for convenience.
  */
 static inline Atom
 get_atom(session_t *ps, const char *atom_name) {
   return XInternAtom(ps->dpy, atom_name, False);
+}
+
+/**
+ * Return the painting target window.
+ */
+static inline Window
+get_tgt_window(session_t *ps) {
+  return ps->o.paint_on_overlay ? ps->overlay: ps->root;
 }
 
 /**
@@ -1372,6 +1558,40 @@ copy_region(const session_t *ps, XserverRegion oldregion) {
 }
 
 /**
+ * Destroy a <code>XserverRegion</code>.
+ */
+static inline void
+free_region(session_t *ps, XserverRegion *p) {
+  if (*p) {
+    XFixesDestroyRegion(ps->dpy, *p);
+    *p = None;
+  }
+}
+
+/**
+ * Crop a rectangle by another rectangle.
+ *
+ * psrc and pdst cannot be the same.
+ */
+static inline void
+rect_crop(XRectangle *pdst, const XRectangle *psrc, const XRectangle *pbound) {
+  assert(psrc != pdst);
+  pdst->x = max_i(psrc->x, pbound->x);
+  pdst->y = max_i(psrc->y, pbound->y);
+  pdst->width = max_i(0, min_i(psrc->x + psrc->width, pbound->x + pbound->width) - pdst->x);
+  pdst->height = max_i(0, min_i(psrc->y + psrc->height, pbound->y + pbound->height) - pdst->y);
+}
+
+/**
+ * Check if a rectangle includes the whole screen.
+ */
+static inline bool
+rect_is_fullscreen(session_t *ps, int x, int y, unsigned wid, unsigned hei) {
+  return (x <= 0 && y <= 0
+      && (x + wid) >= ps->root_width && (y + hei) >= ps->root_height);
+}
+
+/**
  * Determine if a window has a specific property.
  *
  * @param ps current session
@@ -1388,7 +1608,7 @@ wid_has_prop(const session_t *ps, Window w, Atom atom) {
 
   if (Success == XGetWindowProperty(ps->dpy, w, atom, 0, 0, False,
         AnyPropertyType, &type, &format, &nitems, &after, &data)) {
-    XFree(data);
+    cxfree(data);
     if (type) return true;
   }
 
@@ -1442,7 +1662,7 @@ static inline void
 free_winprop(winprop_t *pprop) {
   // Empty the whole structure to avoid possible issues
   if (pprop->data.p8) {
-    XFree(pprop->data.p8);
+    cxfree(pprop->data.p8);
     pprop->data.p8 = NULL;
   }
   pprop->nitems = 0;
@@ -1454,6 +1674,99 @@ force_repaint(session_t *ps);
 bool
 vsync_init(session_t *ps);
 
+#ifdef CONFIG_VSYNC_OPENGL
+/** @name GLX
+ */
+///@{
+
+bool
+glx_init(session_t *ps, bool need_render);
+
+void
+glx_destroy(session_t *ps);
+
+void
+glx_on_root_change(session_t *ps);
+
+bool
+glx_init_blur(session_t *ps);
+
+bool
+glx_bind_pixmap(session_t *ps, glx_texture_t **pptex, Pixmap pixmap,
+    unsigned width, unsigned height, unsigned depth);
+
+void
+glx_release_pixmap(session_t *ps, glx_texture_t *ptex);
+
+void
+glx_paint_pre(session_t *ps, XserverRegion *preg);
+
+/**
+ * Check if a texture is binded, or is binded to the given pixmap.
+ */
+static inline bool
+glx_tex_binded(const glx_texture_t *ptex, Pixmap pixmap) {
+  return ptex && ptex->glpixmap && ptex->texture
+    && (!pixmap || pixmap == ptex->pixmap);
+}
+
+void
+glx_set_clip(session_t *ps, XserverRegion reg, const reg_data_t *pcache_reg);
+
+bool
+glx_blur_dst(session_t *ps, int dx, int dy, int width, int height, float z,
+    GLfloat factor_center, XserverRegion reg_tgt, const reg_data_t *pcache_reg);
+
+bool
+glx_dim_dst(session_t *ps, int dx, int dy, int width, int height, float z,
+    GLfloat factor, XserverRegion reg_tgt, const reg_data_t *pcache_reg);
+
+bool
+glx_render(session_t *ps, const glx_texture_t *ptex,
+    int x, int y, int dx, int dy, int width, int height, int z,
+    double opacity, bool neg,
+    XserverRegion reg_tgt, const reg_data_t *pcache_reg);
+
+void
+glx_swap_copysubbuffermesa(session_t *ps, XserverRegion reg);
+
+#ifdef CONFIG_VSYNC_OPENGL_GLSL
+GLuint
+glx_create_shader(GLenum shader_type, const char *shader_str);
+
+GLuint
+glx_create_program(const GLuint * const shaders, int nshaders);
+#endif
+#endif
+
+static inline void
+free_texture(session_t *ps, glx_texture_t **pptex) {
+#ifdef CONFIG_VSYNC_OPENGL
+  glx_texture_t *ptex = *pptex;
+
+  // Quit if there's nothing
+  if (!ptex)
+    return;
+
+  glx_release_pixmap(ps, ptex);
+
+  // Free texture
+  if (ptex->texture) {
+    glDeleteTextures(1, &ptex->texture);
+    ptex->texture = 0;
+  }
+
+  // Free structure itself
+  free(ptex);
+  *pptex = NULL;
+#endif
+}
+
+///@}
+
+/** @name DBus handling
+ */
+///@{
 #ifdef CONFIG_DBUS
 /** @name DBus handling
  */
@@ -1478,6 +1791,12 @@ cdbus_ev_win_mapped(session_t *ps, win *w);
 
 void
 cdbus_ev_win_unmapped(session_t *ps, win *w);
+
+void
+cdbus_ev_win_focusout(session_t *ps, win *w);
+
+void
+cdbus_ev_win_focusin(session_t *ps, win *w);
 //!@}
 
 /** @name DBus hooks
@@ -1491,6 +1810,9 @@ win_set_focused_force(session_t *ps, win *w, switch_t val);
 
 void
 win_set_invert_color_force(session_t *ps, win *w, switch_t val);
+
+void
+opts_init_track_focus(session_t *ps);
 //!@}
 #endif
 
@@ -1513,3 +1835,39 @@ c2_match(session_t *ps, win *w, const c2_lptr_t *condlst,
 ///@}
 
 #endif
+
+/**
+ * @brief Dump raw bytes in HEX format.
+ *
+ * @param data pointer to raw data
+ * @param len length of data
+ */
+static inline void
+hexdump(const char *data, int len) {
+  static const int BYTE_PER_LN = 16;
+
+  if (len <= 0)
+    return;
+
+  // Print header
+  printf("%10s:", "Offset");
+  for (int i = 0; i < BYTE_PER_LN; ++i)
+    printf(" %2d", i);
+  putchar('\n');
+
+  // Dump content
+  for (int offset = 0; offset < len; ++offset) {
+    if (!(offset % BYTE_PER_LN))
+      printf("0x%08x:", offset);
+
+    printf(" %02hhx", data[offset]);
+
+    if ((BYTE_PER_LN - 1) == offset % BYTE_PER_LN)
+      putchar('\n');
+  }
+  if (len % BYTE_PER_LN)
+    putchar('\n');
+
+  fflush(stdout);
+}
+

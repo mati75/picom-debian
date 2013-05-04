@@ -716,6 +716,11 @@ cdbus_process_win_get(session_t *ps, DBusMessage *msg) {
   cdbus_m_win_get_do(right_width, cdbus_reply_uint32);
   cdbus_m_win_get_do(top_width, cdbus_reply_uint32);
   cdbus_m_win_get_do(bottom_width, cdbus_reply_uint32);
+
+  cdbus_m_win_get_do(shadow, cdbus_reply_bool);
+  cdbus_m_win_get_do(fade, cdbus_reply_bool);
+  cdbus_m_win_get_do(invert_color, cdbus_reply_bool);
+  cdbus_m_win_get_do(blur_background, cdbus_reply_bool);
 #undef cdbus_m_win_get_do
 
   printf_errf("(): " CDBUS_ERROR_BADTGT_S, target);
@@ -876,6 +881,11 @@ cdbus_process_opts_get(session_t *ps, DBusMessage *msg) {
     cdbus_reply_string(ps, msg, VSYNC_STRS[ps->o.vsync]);
     return true;
   }
+  if (!strcmp("backend", target)) {
+    assert(ps->o.backend < sizeof(BACKEND_STRS) / sizeof(BACKEND_STRS[0]));
+    cdbus_reply_string(ps, msg, BACKEND_STRS[ps->o.backend]);
+    return true;
+  }
   cdbus_m_opts_get_do(dbe, cdbus_reply_bool);
   cdbus_m_opts_get_do(vsync_aggressive, cdbus_reply_bool);
 
@@ -898,6 +908,18 @@ cdbus_process_opts_get(session_t *ps, DBusMessage *msg) {
   cdbus_m_opts_get_do(use_ewmh_active_win, cdbus_reply_bool);
   cdbus_m_opts_get_do(detect_transient, cdbus_reply_bool);
   cdbus_m_opts_get_do(detect_client_leader, cdbus_reply_bool);
+
+#ifdef CONFIG_VSYNC_OPENGL
+  cdbus_m_opts_get_do(glx_no_stencil, cdbus_reply_bool);
+  cdbus_m_opts_get_do(glx_copy_from_front, cdbus_reply_bool);
+  cdbus_m_opts_get_do(glx_use_copysubbuffermesa, cdbus_reply_bool);
+  cdbus_m_opts_get_do(glx_no_rebind_pixmap, cdbus_reply_bool);
+  if (!strcmp("glx_swap_method", target)) {
+    assert(ps->o.glx_swap_method < sizeof(GLX_SWAP_METHODS_STRS) / sizeof(GLX_SWAP_METHODS_STRS[0]));
+    cdbus_reply_string(ps, msg, GLX_SWAP_METHODS_STRS[ps->o.glx_swap_method]);
+    return true;
+  }
+#endif
 
   cdbus_m_opts_get_do(track_focus, cdbus_reply_bool);
   cdbus_m_opts_get_do(track_wdata, cdbus_reply_bool);
@@ -949,6 +971,18 @@ cdbus_process_opts_set(session_t *ps, DBusMessage *msg) {
     if (ps->o.clear_shadow != val) {
       ps->o.clear_shadow = val;
       force_repaint(ps);
+    }
+    goto cdbus_process_opts_set_success;
+  }
+
+  // track_focus
+  if (!strcmp("track_focus", target)) {
+    dbus_bool_t val = FALSE;
+    if (!cdbus_msg_get_arg(msg, 1, DBUS_TYPE_BOOLEAN, &val))
+      return false;
+    // You could enable this option, but never turn if off
+    if (val) {
+      opts_init_track_focus(ps);
     }
     goto cdbus_process_opts_set_success;
   }
@@ -1011,6 +1045,12 @@ cdbus_process_introspect(session_t *ps, DBusMessage *msg) {
     "    <signal name='win_unmapped'>\n"
     "      <arg name='wid' type='" CDBUS_TYPE_WINDOW_STR "'/>\n"
     "    </signal>\n"
+    "    <signal name='win_focusin'>\n"
+    "      <arg name='wid' type='" CDBUS_TYPE_WINDOW_STR "'/>\n"
+    "    </signal>\n"
+    "    <signal name='win_focusout'>\n"
+    "      <arg name='wid' type='" CDBUS_TYPE_WINDOW_STR "'/>\n"
+    "    </signal>\n"
     "    <method name='reset' />\n"
     "  </interface>\n"
     "</node>\n";
@@ -1046,5 +1086,17 @@ void
 cdbus_ev_win_unmapped(session_t *ps, win *w) {
   if (ps->dbus_conn)
     cdbus_signal_wid(ps, "win_unmapped", w->id);
+}
+
+void
+cdbus_ev_win_focusout(session_t *ps, win *w) {
+  if (ps->dbus_conn)
+    cdbus_signal_wid(ps, "win_focusout", w->id);
+}
+
+void
+cdbus_ev_win_focusin(session_t *ps, win *w) {
+  if (ps->dbus_conn)
+    cdbus_signal_wid(ps, "win_focusin", w->id);
 }
 //!@}

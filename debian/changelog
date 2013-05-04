@@ -1,6 +1,6 @@
-compton (0.0.1+git-b3652f6-2013-03-03-1) experimental; urgency=low
+compton (0.0.1+git-85e7d18-2013-04-21-1) experimental; urgency=low
 
-  * Imported Upstream version 0.0.1+git-b3652f6-2013-03-03
+  * Imported Upstream version 0.0.1+git-85e7d18-2013-04-21
   * Initial release (Closes: #679551)
 
- -- Scott Leggett <scott@sl.id.au>  Mon, 11 Mar 2013 00:40:43 +1100
+ -- Scott Leggett <scott@sl.id.au>  Sat, 04 May 2013 11:51:25 +1000

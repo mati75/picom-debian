@@ -52,6 +52,12 @@ ifeq "$(NO_VSYNC_OPENGL)" ""
   ifeq "$(NO_VSYNC_OPENGL_GLSL)" ""
     CFG += -DCONFIG_VSYNC_OPENGL_GLSL
   endif
+  ifeq "$(NO_VSYNC_OPENGL_FBO)" ""
+    CFG += -DCONFIG_VSYNC_OPENGL_FBO
+  endif
+  ifeq "$(NO_VSYNC_OPENGL_VBO)" ""
+    CFG += -DCONFIG_VSYNC_OPENGL_VBO
+  endif
 endif
 
 # ==== D-Bus ====
@@ -73,14 +79,14 @@ CFG += -DCOMPTON_VERSION="\"$(COMPTON_VERSION)\""
 
 LDFLAGS ?= -Wl,-O1 -Wl,--as-needed
 
-ifeq "$(DEV)" ""
+ifeq "$(CFG_DEV)" ""
   CFLAGS ?= -DNDEBUG -O2 -D_FORTIFY_SOURCE=2
 else
   CC = clang
   export LD_ALTEXEC = /usr/bin/ld.gold
   OBJS += backtrace-symbols.o
   LIBS += -lbfd
-  CFLAGS += -ggdb
+  CFLAGS += -ggdb -Wshadow
   # CFLAGS += -Weverything -Wno-disabled-macro-expansion -Wno-padded -Wno-gnu
 endif
 

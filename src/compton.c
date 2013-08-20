@@ -9,6 +9,7 @@
  */
 
 #include "compton.h"
+#include <ctype.h>
 
 // === Global constants ===
 
@@ -49,14 +50,6 @@ const char * const BACKEND_STRS[NUM_BKEND + 1] = {
   NULL
 };
 
-/// Names of GLX swap methods.
-const char * const GLX_SWAP_METHODS_STRS[NUM_SWAPM + 1] = {
-  "undefined",    // SWAPM_UNDEFINED
-  "exchange",     // SWAPM_EXCHANGE
-  "copy",         // SWAPM_COPY
-  NULL
-};
-
 /// Function pointers to init VSync modes.
 static bool (* const (VSYNC_FUNCS_INIT[NUM_VSYNC]))(session_t *ps) = {
   [VSYNC_DRM          ] = vsync_drm_init,
@@ -74,6 +67,14 @@ static int (* const (VSYNC_FUNCS_WAIT[NUM_VSYNC]))(session_t *ps) = {
 #ifdef CONFIG_VSYNC_OPENGL
   [VSYNC_OPENGL     ] = vsync_opengl_wait,
   [VSYNC_OPENGL_OML ] = vsync_opengl_oml_wait,
+#endif
+};
+
+/// Function pointers to deinitialize VSync.
+static void (* const (VSYNC_FUNCS_DEINIT[NUM_VSYNC]))(session_t *ps) = {
+#ifdef CONFIG_VSYNC_OPENGL
+  [VSYNC_OPENGL_SWC   ] = vsync_opengl_swc_deinit,
+  [VSYNC_OPENGL_MSWC  ] = vsync_opengl_mswc_deinit,
 #endif
 };
 
@@ -677,30 +678,6 @@ win_rounded_corners(session_t *ps, win *w) {
 }
 
 /**
- * Validate pixmap of a window, and destroy pixmap and picture if invalid.
- */
-static void
-win_validate_pixmap(session_t *ps, win *w) {
-  if (!w->paint.pixmap)
-    return;
-
-  // Detect whether the pixmap is valid with XGetGeometry. Well, maybe there
-  // are better ways.
-  bool invalid = false;
-  {
-    Window rroot = None;
-    int rx = 0, ry = 0;
-    unsigned rwid = 0, rhei = 0, rborder = 0, rdepth = 0;
-    invalid = (!XGetGeometry(ps->dpy, w->paint.pixmap, &rroot, &rx, &ry,
-          &rwid, &rhei, &rborder, &rdepth) || !rwid || !rhei);
-  }
-
-  // Destroy pixmap and picture, if invalid
-  if (invalid)
-    free_paint(ps, &w->paint);
-}
-
-/**
  * Add a pattern to a condition linked list.
  */
 static bool
@@ -846,6 +823,10 @@ get_root_tile(session_t *ps) {
     }
     free_winprop(&prop);
   }
+
+  // Make sure the pixmap we got is valid
+  if (pixmap && !validate_pixmap(ps, pixmap))
+    pixmap = None;
 
   // Create a pixmap if there isn't any
   if (!pixmap) {
@@ -1095,7 +1076,7 @@ get_alpha_pict_o(session_t *ps, opacity_t o) {
 static win *
 paint_preprocess(session_t *ps, win *list) {
   // Initialize unredir_possible
-  ps->unredir_possible = false;
+  bool unredir_possible = false;
 
   win *w;
   win *t = NULL, *next = NULL;
@@ -1146,6 +1127,8 @@ paint_preprocess(session_t *ps, win *list) {
           && !w->paint.pixmap)) {
       to_paint = false;
     }
+
+    to_paint = to_paint && !w->paint_excluded;
 
     if (to_paint) {
       // If opacity changes
@@ -1246,13 +1229,13 @@ paint_preprocess(session_t *ps, win *list) {
 
       last_reg_ignore = w->reg_ignore;
 
-      if (is_highest && to_paint) {
+      if (ps->o.unredir_if_possible && is_highest && to_paint) {
         is_highest = false;
         // Disable unredirection for multi-screen setups
         if (WMODE_SOLID == w->mode
             && (!w->frame_opacity || !win_has_frame(w))
             && win_is_fullscreen(ps, w))
-          ps->unredir_possible = true;
+          unredir_possible = true;
       }
 
       // Reset flags
@@ -1276,12 +1259,13 @@ paint_preprocess(session_t *ps, win *list) {
   }
 
   // If possible, unredirect all windows and stop painting
-  if (ps->o.unredir_if_possible && ps->unredir_possible) {
+  if (UNSET != ps->o.redirected_force)
+    unredir_possible = !ps->o.redirected_force;
+
+  if (unredir_possible)
     redir_stop(ps);
-  }
-  else {
+  else
     redir_start(ps);
-  }
 
   return t;
 }
@@ -1303,13 +1287,11 @@ win_paint_shadow(session_t *ps, win *w,
 }
 
 /**
- * Create an alternative picture for a window.
+ * Create an picture.
  */
 static inline Picture
-win_build_picture(session_t *ps, win *w, XRenderPictFormat *pictfmt) {
-  const int wid = w->widthb;
-  const int hei = w->heightb;
-
+xr_build_picture(session_t *ps, int wid, int hei,
+    XRenderPictFormat *pictfmt) {
   if (!pictfmt)
     pictfmt = XRenderFindVisualFormat(ps->dpy, ps->vis);
 
@@ -1324,6 +1306,73 @@ win_build_picture(session_t *ps, win *w, XRenderPictFormat *pictfmt) {
   free_pixmap(ps, &tmp_pixmap);
 
   return tmp_picture;
+}
+
+/**
+ * @brief Blur an area on a buffer.
+ *
+ * @param ps current session
+ * @param tgt_buffer a buffer as both source and destination
+ * @param x x pos
+ * @param y y pos
+ * @param wid width
+ * @param hei height
+ * @param blur_kerns blur kernels, ending with a NULL, guaranteed to have at
+ *                    least one kernel
+ * @param reg_clip a clipping region to be applied on intermediate buffers
+ *
+ * @return true if successful, false otherwise
+ */
+static bool
+xr_blur_dst(session_t *ps, Picture tgt_buffer,
+    int x, int y, int wid, int hei, XFixed **blur_kerns,
+    XserverRegion reg_clip) {
+  assert(blur_kerns[0]);
+
+  // Directly copying from tgt_buffer to it does not work, so we create a
+  // Picture in the middle.
+  Picture tmp_picture = xr_build_picture(ps, wid, hei, NULL);
+
+  if (!tmp_picture) {
+    printf_errf("(): Failed to build intermediate Picture.");
+    return false;
+  }
+
+  if (reg_clip && tmp_picture)
+    XFixesSetPictureClipRegion(ps->dpy, tmp_picture, reg_clip, 0, 0);
+
+  Picture src_pict = tgt_buffer, dst_pict = tmp_picture;
+  for (int i = 0; blur_kerns[i]; ++i) {
+    assert(i < MAX_BLUR_PASS - 1);
+    XFixed *convolution_blur = blur_kerns[i];
+    int kwid = XFixedToDouble(convolution_blur[0]),
+        khei = XFixedToDouble(convolution_blur[1]);
+    bool rd_from_tgt = (tgt_buffer == src_pict);
+
+    // Copy from source picture to destination. The filter must
+    // be applied on source picture, to get the nearby pixels outside the
+    // window.
+    XRenderSetPictureFilter(ps->dpy, src_pict, XRFILTER_CONVOLUTION,
+        convolution_blur, kwid * khei + 2);
+    XRenderComposite(ps->dpy, PictOpSrc, src_pict, None, dst_pict,
+        (rd_from_tgt ? x: 0), (rd_from_tgt ? y: 0), 0, 0,
+        (rd_from_tgt ? 0: x), (rd_from_tgt ? 0: y), wid, hei);
+    xrfilter_reset(ps, src_pict);
+
+    {
+      XserverRegion tmp = src_pict;
+      src_pict = dst_pict;
+      dst_pict = tmp;
+    }
+  }
+
+  if (src_pict != tgt_buffer)
+    XRenderComposite(ps->dpy, PictOpSrc, src_pict, None, tgt_buffer,
+        0, 0, 0, 0, x, y, wid, hei);
+
+  free_picture(ps, &tmp_picture);
+
+  return true;
 }
 
 /**
@@ -1348,56 +1397,63 @@ win_blur_background(session_t *ps, win *w, Picture tgt_buffer,
   switch (ps->o.backend) {
     case BKEND_XRENDER:
       {
-        const static int convolution_blur_size = 3;
-        // Convolution filter parameter (box blur)
-        // gaussian or binomial filters are definitely superior, yet looks
-        // like they aren't supported as of xorg-server-1.13.0
-        XFixed convolution_blur[] = {
-          // Must convert to XFixed with XDoubleToFixed()
-          // Matrix size
-          XDoubleToFixed(convolution_blur_size),
-          XDoubleToFixed(convolution_blur_size),
-          // Matrix
-          XDoubleToFixed(1), XDoubleToFixed(1), XDoubleToFixed(1),
-          XDoubleToFixed(1), XDoubleToFixed(1), XDoubleToFixed(1),
-          XDoubleToFixed(1), XDoubleToFixed(1), XDoubleToFixed(1),
-        };
+        // Normalize blur kernels
+        for (int i = 0; i < MAX_BLUR_PASS; ++i) {
+          XFixed *kern_src = ps->o.blur_kerns[i];
+          XFixed *kern_dst = ps->blur_kerns_cache[i];
+          assert(i < MAX_BLUR_PASS);
+          if (!kern_src) {
+            assert(!kern_dst);
+            break;
+          }
 
-        // Directly copying from tgt_buffer does not work, so we create a
-        // Picture in the middle.
-        Picture tmp_picture = win_build_picture(ps, w, NULL);
+          assert(!kern_dst
+              || (kern_src[0] == kern_dst[0] && kern_src[1] == kern_dst[1]));
 
-        if (!tmp_picture)
-          return;
+          // Skip for fixed factor_center if the cache exists already
+          if (ps->o.blur_background_fixed && kern_dst) continue;
 
-        convolution_blur[2 + convolution_blur_size + ((convolution_blur_size - 1) / 2)] = XDoubleToFixed(factor_center);
+          int kwid = XFixedToDouble(kern_src[0]),
+              khei = XFixedToDouble(kern_src[1]);
+
+          // Allocate cache space if needed
+          if (!kern_dst) {
+            kern_dst = malloc((kwid * khei + 2) * sizeof(XFixed));
+            if (!kern_dst) {
+              printf_errf("(): Failed to allocate memory for blur kernel.");
+              return;
+            }
+            ps->blur_kerns_cache[i] = kern_dst;
+          }
+
+          // Modify the factor of the center pixel
+          kern_src[2 + (khei / 2) * kwid + kwid / 2] =
+            XDoubleToFixed(factor_center);
+
+          // Copy over
+          memcpy(kern_dst, kern_src, (kwid * khei + 2) * sizeof(XFixed));
+          normalize_conv_kern(kwid, khei, kern_dst + 2);
+        }
 
         // Minimize the region we try to blur, if the window itself is not
         // opaque, only the frame is.
-        if (WMODE_SOLID == w->mode && w->frame_opacity) {
+        XserverRegion reg_noframe = None;
+        if (WMODE_SOLID == w->mode) {
           XserverRegion reg_all = border_size(ps, w, false);
-          XserverRegion reg_noframe = win_get_region_noframe(ps, w, false);
+          reg_noframe = win_get_region_noframe(ps, w, false);
           XFixesSubtractRegion(ps->dpy, reg_noframe, reg_all, reg_noframe);
-          XFixesSetPictureClipRegion(ps->dpy, tmp_picture, reg_noframe, 0, 0);
           free_region(ps, &reg_all);
-          free_region(ps, &reg_noframe);
         }
-
-        // Copy the content to tmp_picture, then copy back. The filter must
-        // be applied on tgt_buffer, to get the nearby pixels outside the
-        // window.
-        XRenderSetPictureFilter(ps->dpy, tgt_buffer, XRFILTER_CONVOLUTION, (XFixed *) convolution_blur, sizeof(convolution_blur) / sizeof(XFixed));
-        XRenderComposite(ps->dpy, PictOpSrc, tgt_buffer, None, tmp_picture, x, y, 0, 0, 0, 0, wid, hei);
-        xrfilter_reset(ps, tgt_buffer);
-        XRenderComposite(ps->dpy, PictOpSrc, tmp_picture, None, tgt_buffer, 0, 0, 0, 0, x, y, wid, hei);
-
-        free_picture(ps, &tmp_picture);
+        xr_blur_dst(ps, tgt_buffer, x, y, wid, hei, ps->blur_kerns_cache,
+            reg_noframe);
+        free_region(ps, &reg_noframe);
       }
       break;
-#ifdef CONFIG_VSYNC_OPENGL
+#ifdef CONFIG_VSYNC_OPENGL_GLSL
     case BKEND_GLX:
+      // TODO: Handle frame opacity
       glx_blur_dst(ps, x, y, wid, hei, ps->glx_z - 0.5, factor_center,
-          reg_paint, pcache_reg);
+          reg_paint, pcache_reg, &w->glx_blur_cache);
       break;
 #endif
     default:
@@ -1439,6 +1495,8 @@ render(session_t *ps, int x, int y, int dx, int dy, int wid, int hei,
 static inline void
 win_paint_win(session_t *ps, win *w, XserverRegion reg_paint,
     const reg_data_t *pcache_reg) {
+  glx_mark(ps, w->id, true);
+
   // Fetch Pixmap
   if (!w->paint.pixmap && ps->has_name_pixmap) {
     set_ignore_next(ps);
@@ -1482,7 +1540,7 @@ win_paint_win(session_t *ps, win *w, XserverRegion reg_paint,
 
   // Invert window color, if required
   if (BKEND_XRENDER == ps->o.backend && w->invert_color) {
-    Picture newpict = win_build_picture(ps, w, w->pictfmt);
+    Picture newpict = xr_build_picture(ps, wid, hei, w->pictfmt);
     if (newpict) {
       // Apply clipping region to save some CPU
       if (reg_paint) {
@@ -1601,6 +1659,8 @@ win_paint_win(session_t *ps, win *w, XserverRegion reg_paint,
 #endif
     }
   }
+
+  glx_mark(ps, w->id, false);
 }
 
 /**
@@ -1613,8 +1673,21 @@ rebuild_screen_reg(session_t *ps) {
   ps->screen_reg = get_screen_region(ps);
 }
 
+/**
+ * Rebuild <code>shadow_exclude_reg</code>.
+ */
 static void
-paint_all(session_t *ps, XserverRegion region, win *t) {
+rebuild_shadow_exclude_reg(session_t *ps) {
+  free_region(ps, &ps->shadow_exclude_reg);
+  XRectangle rect = geom_to_rect(ps, &ps->o.shadow_exclude_reg_geom, NULL);
+  ps->shadow_exclude_reg = rect_to_reg(ps, &rect);
+}
+
+static void
+paint_all(session_t *ps, XserverRegion region, XserverRegion region_real, win *t) {
+  if (!region_real)
+    region_real = region;
+
 #ifdef DEBUG_REPAINT
   static struct timespec last_paint = { 0 };
 #endif
@@ -1628,7 +1701,7 @@ paint_all(session_t *ps, XserverRegion region, win *t) {
 #endif
 
   if (!region) {
-    region = get_screen_region(ps);
+    region_real = region = get_screen_region(ps);
   }
   else {
     // Remove the damaged area out of screen
@@ -1662,13 +1735,22 @@ paint_all(session_t *ps, XserverRegion region, win *t) {
   }
 #endif
 
-  XFixesSetPictureClipRegion(ps->dpy, ps->tgt_picture, 0, 0, region);
+  if (BKEND_XRENDER == ps->o.backend)
+    XFixesSetPictureClipRegion(ps->dpy, ps->tgt_picture, 0, 0, region_real);
 
 #ifdef MONITOR_REPAINT
-  XRenderComposite(
-    ps->dpy, PictOpSrc, ps->black_picture, None,
-    ps->tgt_picture, 0, 0, 0, 0, 0, 0,
-    ps->root_width, ps->root_height);
+  switch (ps->o.backend) {
+    case BKEND_XRENDER:
+      XRenderComposite(ps->dpy, PictOpSrc, ps->black_picture, None,
+          ps->tgt_picture, 0, 0, 0, 0, 0, 0,
+          ps->root_width, ps->root_height);
+      break;
+    case BKEND_GLX:
+      glClearColor(0.0f, 0.0f, 1.0f, 1.0f);
+      glClear(GL_COLOR_BUFFER_BIT);
+      glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
+      break;
+  }
 #endif
 
   if (t && t->reg_ignore) {
@@ -1711,6 +1793,10 @@ paint_all(session_t *ps, XserverRegion region, win *t) {
         reg_paint = reg_tmp;
         XFixesIntersectRegion(ps->dpy, reg_paint, region, w->extents);
       }
+
+      if (ps->shadow_exclude_reg)
+        XFixesSubtractRegion(ps->dpy, reg_paint, reg_paint,
+            ps->shadow_exclude_reg);
 
       // Might be worthwhile to crop the region to shadow border
       {
@@ -1829,7 +1915,7 @@ paint_all(session_t *ps, XserverRegion region, win *t) {
 #ifdef CONFIG_VSYNC_OPENGL
     case BKEND_GLX:
       if (ps->o.glx_use_copysubbuffermesa)
-        glx_swap_copysubbuffermesa(ps, region);
+        glx_swap_copysubbuffermesa(ps, region_real);
       else
         glXSwapBuffers(ps->dpy, get_tgt_window(ps));
       break;
@@ -1837,6 +1923,7 @@ paint_all(session_t *ps, XserverRegion region, win *t) {
     default:
       assert(0);
   }
+  glx_mark_frame(ps);
 
   if (ps->o.vsync_aggressive)
     vsync_wait(ps);
@@ -2013,14 +2100,8 @@ map_win(session_t *ps, Window id) {
   win_determine_shadow(ps, w);
 
   // Set fading state
-  w->in_openclose = false;
-  if (ps->o.no_fading_openclose) {
-    set_fade_callback(ps, w, finish_map_win, true);
-    w->in_openclose = true;
-  }
-  else {
-    set_fade_callback(ps, w, NULL, true);
-  }
+  w->in_openclose = true;
+  set_fade_callback(ps, w, finish_map_win, true);
   win_determine_fade(ps, w);
 
   win_determine_blur_background(ps, w);
@@ -2086,9 +2167,7 @@ unmap_win(session_t *ps, win *w) {
   // Fading out
   w->flags |= WFLAG_OPCT_CHANGE;
   set_fade_callback(ps, w, unmap_callback, false);
-  if (ps->o.no_fading_openclose) {
-    w->in_openclose = true;
-  }
+  w->in_openclose = true;
   win_determine_fade(ps, w);
 
   // Validate pixmap if we have to do fading
@@ -2215,7 +2294,9 @@ calc_dim(session_t *ps, win *w) {
  */
 static void
 win_determine_fade(session_t *ps, win *w) {
-  if ((ps->o.no_fading_openclose && w->in_openclose)
+  if (UNSET != w->fade_force)
+    w->fade = w->fade_force;
+  else if ((ps->o.no_fading_openclose && w->in_openclose)
       || win_match(ps, w, ps->o.fade_blacklist, &w->cache_fblst))
     w->fade = false;
   else
@@ -2363,6 +2444,28 @@ win_determine_blur_background(session_t *ps, win *w) {
 }
 
 /**
+ * Update window opacity according to opacity rules.
+ */
+static void
+win_update_opacity_rule(session_t *ps, win *w) {
+  // If long is 32-bit, unfortunately there's no way could we express "unset",
+  // so we just entirely don't distinguish "unset" and OPAQUE
+  long opacity = OPAQUE;
+  void *val = NULL;
+  if (c2_matchd(ps, w, ps->o.opacity_rules, &w->cache_oparule, &val))
+    opacity = ((double) (long) val) / 100.0 * OPAQUE;
+
+  if (opacity == w->opacity_set)
+    return;
+
+  if (OPAQUE != opacity)
+    wid_set_opacity_prop(ps, w->id, opacity);
+  else if (OPAQUE != w->opacity_set)
+    wid_rm_opacity_prop(ps, w->id);
+  w->opacity_set = opacity;
+}
+
+/**
  * Function to be called on window type changes.
  */
 static void
@@ -2372,6 +2475,8 @@ win_on_wtype_change(session_t *ps, win *w) {
   win_update_focused(ps, w);
   if (ps->o.invert_color_list)
     win_determine_invert_color(ps, w);
+  if (ps->o.opacity_rules)
+    win_update_opacity_rule(ps, w);
 }
 
 /**
@@ -2389,6 +2494,11 @@ win_on_factor_change(session_t *ps, win *w) {
     win_update_focused(ps, w);
   if (ps->o.blur_background_blacklist)
     win_determine_blur_background(ps, w);
+  if (ps->o.opacity_rules)
+    win_update_opacity_rule(ps, w);
+  if (ps->o.paint_blacklist)
+    w->paint_excluded = win_match(ps, w, ps->o.paint_blacklist,
+        &w->cache_pblst);
 }
 
 /**
@@ -2606,13 +2716,16 @@ add_win(session_t *ps, Window id, Window prev) {
     .cache_fcblst = NULL,
     .cache_ivclst = NULL,
     .cache_bbblst = NULL,
+    .cache_oparule = NULL,
 
     .opacity = 0,
     .opacity_tgt = 0,
     .opacity_prop = OPAQUE,
     .opacity_prop_client = OPAQUE,
+    .opacity_set = OPAQUE,
 
     .fade = false,
+    .fade_force = UNSET,
     .fade_callback = NULL,
 
     .frame_opacity = 0.0,
@@ -2795,10 +2908,12 @@ configure_win(session_t *ps, XConfigureEvent *ce) {
       XRenderFreePicture(ps->dpy, ps->tgt_buffer);
       ps->tgt_buffer = None;
     }
+
     ps->root_width = ce->width;
     ps->root_height = ce->height;
 
     rebuild_screen_reg(ps);
+    rebuild_shadow_exclude_reg(ps);
 
 #ifdef CONFIG_VSYNC_OPENGL
     if (BKEND_GLX == ps->o.backend)
@@ -2825,6 +2940,8 @@ configure_win(session_t *ps, XConfigureEvent *ce) {
       restack_win(ps, w, ce->above);
     }
 
+    bool factor_change = false;
+
     // Windows restack (including window restacks happened when this
     // window is not mapped) could mess up all reg_ignore
     ps->reg_ignore_expire = true;
@@ -2840,6 +2957,7 @@ configure_win(session_t *ps, XConfigureEvent *ce) {
     if (w->a.x != ce->x || w->a.y != ce->y
         || w->a.width != ce->width || w->a.height != ce->height
         || w->a.border_width != ce->border_width) {
+      factor_change = true;
       free_region(ps, &w->extents);
       free_region(ps, &w->border_size);
     }
@@ -2870,6 +2988,9 @@ configure_win(session_t *ps, XConfigureEvent *ce) {
       XFixesDestroyRegion(ps->dpy, extents);
       add_damage(ps, damage);
     }
+
+    if (factor_change)
+      win_on_factor_change(ps, w);
   }
 
   // override_redirect flag cannot be changed after window creation, as far
@@ -3438,6 +3559,19 @@ win_set_shadow_force(session_t *ps, win *w, switch_t val) {
   if (val != w->shadow_force) {
     w->shadow_force = val;
     win_determine_shadow(ps, w);
+    ps->ev_received = true;
+  }
+}
+
+/**
+ * Set w->fade_force of a window.
+ */
+void
+win_set_fade_force(session_t *ps, win *w, switch_t val) {
+  if (val != w->fade_force) {
+    w->fade_force = val;
+    win_determine_fade(ps, w);
+    ps->ev_received = true;
   }
 }
 
@@ -3449,6 +3583,7 @@ win_set_focused_force(session_t *ps, win *w, switch_t val) {
   if (val != w->focused_force) {
     w->focused_force = val;
     win_update_focused(ps, w);
+    ps->ev_received = true;
   }
 }
 
@@ -3460,6 +3595,7 @@ win_set_invert_color_force(session_t *ps, win *w, switch_t val) {
   if (val != w->invert_color_force) {
     w->invert_color_force = val;
     win_determine_invert_color(ps, w);
+    ps->ev_received = true;
   }
 }
 
@@ -3485,6 +3621,20 @@ opts_init_track_focus(session_t *ps) {
   // Recheck focus
   recheck_focus(ps);
 }
+
+/**
+ * Set no_fading_openclose option.
+ */
+void
+opts_set_no_fading_openclose(session_t *ps, bool newval) {
+  if (newval != ps->o.no_fading_openclose) {
+    ps->o.no_fading_openclose = newval;
+    for (win *w = ps->list; w; w = w->next)
+      win_determine_fade(ps, w);
+    ps->ev_received = true;
+  }
+}
+
 //!@}
 #endif
 
@@ -4075,7 +4225,7 @@ ev_handle(session_t *ps, XEvent *ev) {
  * Print usage text and exit.
  */
 static void
-usage(void) {
+usage(int ret) {
 #define WARNING_DISABLED " (DISABLED AT COMPILE TIME)"
 #define WARNING
   const static char *usage_text =
@@ -4175,7 +4325,7 @@ usage(void) {
 #else
 #define WARNING
 #endif
-    "    opengl = Try to VSync with SGI_swap_control OpenGL extension. Only\n"
+    "    opengl = Try to VSync with SGI_video_sync OpenGL extension. Only\n"
     "      work on some drivers." WARNING"\n"
     "    opengl-oml = Try to VSync with OML_sync_control OpenGL extension.\n"
     "      Only work on some drivers. Experimental." WARNING"\n"
@@ -4183,13 +4333,16 @@ usage(void) {
     "      Only work on some drivers. Works only with GLX backend.\n"
     "      Does not actually control paint timing, only buffer swap is\n"
     "      affected, so it doesn't have the effect of --sw-opti unlike\n"
-    "      other methods. Experimental." WARNING "\n"
+    "      other methods." WARNING "\n"
     "    opengl-mswc = Try to VSync with MESA_swap_control OpenGL\n"
     "      extension. Basically the same as opengl-swc above, except the\n"
     "      extension we use." WARNING "\n"
+    "--vsync-aggressive\n"
+    "  Attempt to send painting request before VBlank and do XFlush()\n"
+    "  during VBlank. This switch may be lifted out at any moment.\n"
     "--alpha-step val\n"
-    "  Step for pregenerating alpha pictures. 0.01 - 1.0. Defaults to\n"
-    "  0.03.\n"
+    "  X Render backend: Step for pregenerating alpha pictures. \n"
+    "  0.01 - 1.0. Defaults to 0.03.\n"
     "--dbe\n"
     "  Enable DBE painting mode, intended to use with VSync to\n"
     "  (hopefully) eliminate tearing.\n"
@@ -4197,10 +4350,7 @@ usage(void) {
     "  Painting on X Composite overlay window.\n"
     "--sw-opti\n"
     "  Limit compton to repaint at most once every 1 / refresh_rate\n"
-    "  second to boost performance. Experimental.\n"
-    "--vsync-aggressive\n"
-    "  Attempt to send painting request before VBlank and do XFlush()\n"
-    "  during VBlank. This switch may be lifted out at any moment.\n"
+    "  second to boost performance.\n"
     "--use-ewmh-active-win\n"
     "  Use _NET_WM_ACTIVE_WINDOW on the root window to determine which\n"
     "  window is focused instead of using FocusIn/Out events.\n"
@@ -4210,7 +4360,6 @@ usage(void) {
     "--unredir-if-possible\n"
     "  Unredirect all windows if a full-screen opaque window is\n"
     "  detected, to maximize performance for full-screen windows.\n"
-    "  Experimental.\n"
     "--focus-exclude condition\n"
     "  Specify a list of conditions of windows that should always be\n"
     "  considered focused.\n"
@@ -4234,11 +4383,40 @@ usage(void) {
     "--blur-background-fixed\n"
     "  Use fixed blur strength instead of adjusting according to window\n"
     "  opacity.\n"
+    "--blur-kern matrix\n"
+    "  Specify the blur convolution kernel, with the following format:\n"
+    "    WIDTH,HEIGHT,ELE1,ELE2,ELE3,ELE4,ELE5...\n"
+    "  The element in the center must not be included, it will be forever\n"
+    "  1.0 or changing based on opacity, depending on whether you have\n"
+    "  --blur-background-fixed.\n"
+    "  A 7x7 Guassian blur kernel looks like:\n"
+    "    --blur-kern '7,7,0.000003,0.000102,0.000849,0.001723,0.000849,0.000102,0.000003,0.000102,0.003494,0.029143,0.059106,0.029143,0.003494,0.000102,0.000849,0.029143,0.243117,0.493069,0.243117,0.029143,0.000849,0.001723,0.059106,0.493069,0.493069,0.059106,0.001723,0.000849,0.029143,0.243117,0.493069,0.243117,0.029143,0.000849,0.000102,0.003494,0.029143,0.059106,0.029143,0.003494,0.000102,0.000003,0.000102,0.000849,0.001723,0.000849,0.000102,0.000003'\n"
+    "  Up to 4 blur kernels may be specified, separated with semicolon, for\n"
+    "  multi-pass blur.\n"
+    "  May also be one the predefined kernels: 3x3box (default), 5x5box,\n"
+    "  7x7box, 3x3gaussian, 5x5gaussian, 7x7gaussian, 9x9gaussian,\n"
+    "  11x11gaussian.\n"
     "--blur-background-exclude condition\n"
     "  Exclude conditions for background blur.\n"
+    "--resize-damage integer\n"
+    "  Resize damaged region by a specific number of pixels. A positive\n"
+    "  value enlarges it while a negative one shrinks it. Useful for\n"
+    "  fixing the line corruption issues of blur. May or may not\n"
+    "  work with --glx-no-stencil. Shrinking doesn't function correctly.\n"
     "--invert-color-include condition\n"
     "  Specify a list of conditions of windows that should be painted with\n"
     "  inverted color. Resource-hogging, and is not well tested.\n"
+    "--opacity-rule opacity:condition\n"
+    "  Specify a list of opacity rules, in the format \"PERCENT:PATTERN\",\n"
+    "  like \'50:name *= \"Firefox\"'. compton-trans is recommended over\n"
+    "  this. Note we do not distinguish 100% and unset, and we don't make\n"
+    "  any guarantee about possible conflicts with other programs that set\n"
+    "  _NET_WM_WINDOW_OPACITY on frame or client windows.\n"
+    "--shadow-exclude-reg geometry\n"
+    "  Specify a X geometry that describes the region in which shadow\n"
+    "  should not be painted in, such as a dock window region.\n"
+    "  Use --shadow-exclude-reg \'x10+0-0\', for example, if the 10 pixels\n"
+    "  on the bottom of the screen should not have shadows painted on.\n"
     "--backend backend\n"
     "  Choose backend. Possible choices are xrender and glx" WARNING ".\n"
     "--glx-no-stencil\n"
@@ -4247,9 +4425,10 @@ usage(void) {
     "  boost.\n"
     "--glx-copy-from-front\n"
     "  GLX backend: Copy unmodified regions from front buffer instead of\n"
-    "  redrawing them all. My tests with nvidia-drivers show a 10% decrease\n"
-    "  in performance when the whole screen is modified, but a 20% increase\n"
-    "  when only 1/4 is. My tests on nouveau show terrible slowdown.\n"
+    "  redrawing them all. My tests with nvidia-drivers show a 5% decrease\n"
+    "  in performance when the whole screen is modified, but a 30% increase\n"
+    "  when only 1/4 is. My tests on nouveau show terrible slowdown. Could\n"
+    "  work with --glx-swap-method but not --glx-use-copysubbuffermesa.\n"
     "--glx-use-copysubbuffermesa\n"
     "  GLX backend: Use MESA_copy_sub_buffer to do partial screen update.\n"
     "  My tests on nouveau shows a 200% performance boost when only 1/4 of\n"
@@ -4259,12 +4438,17 @@ usage(void) {
     "  GLX backend: Avoid rebinding pixmap on window damage. Probably\n"
     "  could improve performance on rapid window content changes, but is\n"
     "  known to break things on some drivers.\n"
-    "--glx-swap-method undefined/exchange/copy\n"
+    "--glx-swap-method undefined/copy/exchange/3/4/5/6/buffer-age\n"
     "  GLX backend: GLX buffer swap method we assume. Could be\n"
-    "  \"undefined\", \"exchange\", or \"copy\". \"undefined\" is the slowest\n"
-    "  and the safest; \"exchange\" and \"copy\" are faster but may fail on\n"
-    "  some drivers. Useless with --glx-use-copysubbuffermesa. Defaults to\n"
-    "  \"undefined\".\n"
+    "  undefined (0), copy (1), exchange (2), 3-6, or buffer-age (-1).\n"
+    "  \"undefined\" is the slowest and the safest, and the default value.\n"
+    "  1 is fastest, but may fail on some drivers, 2-6 are gradually slower\n"
+    "  but safer (6 is still faster than 0). -1 means auto-detect using\n"
+    "  GLX_EXT_buffer_age, supported by some drivers. Useless with\n"
+    "  --glx-use-copysubbuffermesa.\n"
+    "--glx-use-gpushader4\n"
+    "  GLX backend: Use GL_EXT_gpu_shader4 for some optimization on blur\n"
+    "  GLSL code. My tests on GTX 670 show no noticeable effect.\n"
 #undef WARNING
 #ifndef CONFIG_DBUS
 #define WARNING WARNING_DISABLED
@@ -4280,11 +4464,12 @@ usage(void) {
     "  Specify window ID to repaint in benchmark mode. If omitted or is 0,\n"
     "  the whole screen is repainted.\n"
     ;
-  fputs(usage_text , stderr);
+  FILE *f = (ret ? stderr: stdout);
+  fputs(usage_text, f);
 #undef WARNING
 #undef WARNING_DISABLED
 
-  exit(1);
+  exit(ret);
 }
 
 /**
@@ -4392,6 +4577,288 @@ fork_after(session_t *ps) {
   return success;
 }
 
+/**
+ * Parse a floating-point number in matrix.
+ */
+static inline const char *
+parse_matrix_readnum(const char *src, double *dest) {
+  char *pc = NULL;
+  double val = strtod(src, &pc);
+  if (!pc || pc == src) {
+    printf_errf("(\"%s\"): No number found.", src);
+    return src;
+  }
+
+  while (*pc && (isspace(*pc) || ',' == *pc))
+    ++pc;
+
+  *dest = val;
+
+  return pc;
+}
+
+/**
+ * Parse a matrix.
+ */
+static inline XFixed *
+parse_matrix(session_t *ps, const char *src, const char **endptr) {
+  int wid = 0, hei = 0;
+  const char *pc = NULL;
+  XFixed *matrix = NULL;
+  
+  // Get matrix width and height
+  {
+    double val = 0.0;
+    if (src == (pc = parse_matrix_readnum(src, &val)))
+      goto parse_matrix_err;
+    src = pc;
+    wid = val;
+    if (src == (pc = parse_matrix_readnum(src, &val)))
+      goto parse_matrix_err;
+    src = pc;
+    hei = val;
+  }
+
+  // Validate matrix width and height
+  if (wid <= 0 || hei <= 0) {
+    printf_errf("(): Invalid matrix width/height.");
+    goto parse_matrix_err;
+  }
+  if (!(wid % 2 && hei % 2)) {
+    printf_errf("(): Width/height not odd.");
+    goto parse_matrix_err;
+  }
+  if (wid > 16 || hei > 16) {
+    printf_errf("(): Matrix width/height too large.");
+    goto parse_matrix_err;
+  }
+
+  // Allocate memory
+  matrix = calloc(wid * hei + 2, sizeof(XFixed));
+  if (!matrix) {
+    printf_errf("(): Failed to allocate memory for matrix.");
+    goto parse_matrix_err;
+  }
+
+  // Read elements
+  {
+    int skip = hei / 2 * wid + wid / 2;
+    bool hasneg = false;
+    for (int i = 0; i < wid * hei; ++i) {
+      // Ignore the center element
+      if (i == skip) {
+        matrix[2 + i] = XDoubleToFixed(0);
+        continue;
+      }
+      double val = 0;
+      if (src == (pc = parse_matrix_readnum(src, &val)))
+        goto parse_matrix_err;
+      src = pc;
+      if (val < 0) hasneg = true;
+      matrix[2 + i] = XDoubleToFixed(val);
+    }
+    if (BKEND_XRENDER == ps->o.backend && hasneg)
+      printf_errf("(): A convolution kernel with negative values "
+          "may not work properly under X Render backend.");
+  }
+
+  // Detect trailing characters
+  for ( ;*pc && ';' != *pc; ++pc)
+    if (!isspace(*pc) && ',' != *pc) {
+      printf_errf("(): Trailing characters in matrix string.");
+      goto parse_matrix_err;
+    }
+
+  // Jump over spaces after ';'
+  if (';' == *pc) {
+    ++pc;
+    while (*pc && isspace(*pc))
+      ++pc;
+  }
+
+  // Require an end of string if endptr is not provided, otherwise
+  // copy end pointer to endptr
+  if (endptr)
+    *endptr = pc;
+  else if (*pc) {
+    printf_errf("(): Only one matrix expected.");
+    goto parse_matrix_err;
+  }
+
+  // Fill in width and height
+  matrix[0] = XDoubleToFixed(wid);
+  matrix[1] = XDoubleToFixed(hei);
+
+  return matrix;
+
+parse_matrix_err:
+  free(matrix);
+  return NULL;
+}
+
+/**
+ * Parse a convolution kernel.
+ */
+static inline XFixed *
+parse_conv_kern(session_t *ps, const char *src, const char **endptr) {
+  return parse_matrix(ps, src, endptr);
+}
+
+/**
+ * Parse a list of convolution kernels.
+ */
+static bool
+parse_conv_kern_lst(session_t *ps, const char *src, XFixed **dest, int max) {
+  static const struct {
+    const char *name;
+    const char *kern_str;
+  } CONV_KERN_PREDEF[] = {
+    { "3x3box", "3,3,1,1,1,1,1,1,1,1," },
+    { "5x5box", "5,5,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1," },
+    { "7x7box", "7,7,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1," },
+    { "3x3gaussian", "3,3,0.243117,0.493069,0.243117,0.493069,0.493069,0.243117,0.493069,0.243117," },
+    { "5x5gaussian", "5,5,0.003493,0.029143,0.059106,0.029143,0.003493,0.029143,0.243117,0.493069,0.243117,0.029143,0.059106,0.493069,0.493069,0.059106,0.029143,0.243117,0.493069,0.243117,0.029143,0.003493,0.029143,0.059106,0.029143,0.003493," },
+    { "7x7gaussian", "7,7,0.000003,0.000102,0.000849,0.001723,0.000849,0.000102,0.000003,0.000102,0.003493,0.029143,0.059106,0.029143,0.003493,0.000102,0.000849,0.029143,0.243117,0.493069,0.243117,0.029143,0.000849,0.001723,0.059106,0.493069,0.493069,0.059106,0.001723,0.000849,0.029143,0.243117,0.493069,0.243117,0.029143,0.000849,0.000102,0.003493,0.029143,0.059106,0.029143,0.003493,0.000102,0.000003,0.000102,0.000849,0.001723,0.000849,0.000102,0.000003," },
+    { "9x9gaussian", "9,9,0.000000,0.000000,0.000001,0.000006,0.000012,0.000006,0.000001,0.000000,0.000000,0.000000,0.000003,0.000102,0.000849,0.001723,0.000849,0.000102,0.000003,0.000000,0.000001,0.000102,0.003493,0.029143,0.059106,0.029143,0.003493,0.000102,0.000001,0.000006,0.000849,0.029143,0.243117,0.493069,0.243117,0.029143,0.000849,0.000006,0.000012,0.001723,0.059106,0.493069,0.493069,0.059106,0.001723,0.000012,0.000006,0.000849,0.029143,0.243117,0.493069,0.243117,0.029143,0.000849,0.000006,0.000001,0.000102,0.003493,0.029143,0.059106,0.029143,0.003493,0.000102,0.000001,0.000000,0.000003,0.000102,0.000849,0.001723,0.000849,0.000102,0.000003,0.000000,0.000000,0.000000,0.000001,0.000006,0.000012,0.000006,0.000001,0.000000,0.000000," },
+    { "11x11gaussian", "11,11,0.000000,0.000000,0.000000,0.000000,0.000000,0.000000,0.000000,0.000000,0.000000,0.000000,0.000000,0.000000,0.000000,0.000000,0.000001,0.000006,0.000012,0.000006,0.000001,0.000000,0.000000,0.000000,0.000000,0.000000,0.000003,0.000102,0.000849,0.001723,0.000849,0.000102,0.000003,0.000000,0.000000,0.000000,0.000001,0.000102,0.003493,0.029143,0.059106,0.029143,0.003493,0.000102,0.000001,0.000000,0.000000,0.000006,0.000849,0.029143,0.243117,0.493069,0.243117,0.029143,0.000849,0.000006,0.000000,0.000000,0.000012,0.001723,0.059106,0.493069,0.493069,0.059106,0.001723,0.000012,0.000000,0.000000,0.000006,0.000849,0.029143,0.243117,0.493069,0.243117,0.029143,0.000849,0.000006,0.000000,0.000000,0.000001,0.000102,0.003493,0.029143,0.059106,0.029143,0.003493,0.000102,0.000001,0.000000,0.000000,0.000000,0.000003,0.000102,0.000849,0.001723,0.000849,0.000102,0.000003,0.000000,0.000000,0.000000,0.000000,0.000000,0.000001,0.000006,0.000012,0.000006,0.000001,0.000000,0.000000,0.000000,0.000000,0.000000,0.000000,0.000000,0.000000,0.000000,0.000000,0.000000,0.000000,0.000000,0.000000," },
+  };
+  for (int i = 0;
+      i < sizeof(CONV_KERN_PREDEF) / sizeof(CONV_KERN_PREDEF[0]); ++i)
+    if (!strcmp(CONV_KERN_PREDEF[i].name, src))
+      return parse_conv_kern_lst(ps, CONV_KERN_PREDEF[i].kern_str, dest, max);
+
+  int i = 0;
+  const char *pc = src;
+
+  // Free old kernels
+  for (i = 0; i < max; ++i) {
+    free(dest[i]);
+    dest[i] = NULL;
+  }
+
+  // Continue parsing until the end of source string
+  i = 0;
+  while (pc && *pc && i < max - 1) {
+    if (!(dest[i++] = parse_conv_kern(ps, pc, &pc)))
+      return false;
+  }
+
+  if (*pc) {
+    printf_errf("(): Too many blur kernels!");
+    return false;
+  }
+
+  return true;
+}
+
+/**
+ * Parse a X geometry.
+ */
+static inline bool
+parse_geometry(session_t *ps, const char *src, geometry_t *dest) {
+  geometry_t geom = { .wid = -1, .hei = -1, .x = -1, .y = -1 };
+  long val = 0L;
+  char *endptr = NULL;
+
+#define T_STRIPSPACE() do { \
+  while (*src && isspace(*src)) ++src; \
+  if (!*src) goto parse_geometry_end; \
+} while(0)
+
+  T_STRIPSPACE();
+
+  // Parse width
+  // Must be base 10, because "0x0..." may appear
+  if (!('+' == *src || '-' == *src)) {
+    val = strtol(src, &endptr, 10);
+    if (endptr && src != endptr) {
+      geom.wid = val;
+      assert(geom.wid >= 0);
+      src = endptr;
+    }
+    T_STRIPSPACE();
+  }
+
+  // Parse height
+  if ('x' == *src) {
+    ++src;
+    val = strtol(src, &endptr, 10);
+    if (endptr && src != endptr) {
+      geom.hei = val;
+      if (geom.hei < 0) {
+        printf_errf("(\"%s\"): Invalid height.", src);
+        return false;
+      }
+      src = endptr;
+    }
+    T_STRIPSPACE();
+  }
+
+  // Parse x
+  if ('+' == *src || '-' == *src) {
+    val = strtol(src, &endptr, 10);
+    if (endptr && src != endptr) {
+      geom.x = val;
+      if ('-' == *src && geom.x <= 0)
+        geom.x -= 2;
+      src = endptr;
+    }
+    T_STRIPSPACE();
+  }
+
+  // Parse y
+  if ('+' == *src || '-' == *src) {
+    val = strtol(src, &endptr, 10);
+    if (endptr && src != endptr) {
+      geom.y = val;
+      if ('-' == *src && geom.y <= 0)
+        geom.y -= 2;
+      src = endptr;
+    }
+    T_STRIPSPACE();
+  }
+
+  if (*src) {
+    printf_errf("(\"%s\"): Trailing characters.", src);
+    return false;
+  }
+
+parse_geometry_end:
+  *dest = geom;
+  return true;
+}
+
+/**
+ * Parse a list of opacity rules.
+ */
+static inline bool
+parse_rule_opacity(session_t *ps, const char *src) {
+  // Find opacity value
+  char *endptr = NULL;
+  long val = strtol(src, &endptr, 0);
+  if (!endptr || endptr == src) {
+    printf_errf("(\"%s\"): No opacity specified?", src);
+    return false;
+  }
+  if (val > 100 || val < 0) {
+    printf_errf("(\"%s\"): Opacity %ld invalid.", src, val);
+    return false;
+  }
+
+  // Skip over spaces
+  while (*endptr && isspace(*endptr))
+    ++endptr;
+  if (':' != *endptr) {
+    printf_errf("(\"%s\"): Opacity terminator not found.", src);
+    return false;
+  }
+  ++endptr;
+
+  // Parse pattern
+  // I hope 1-100 is acceptable for (void *)
+  return c2_parsed(ps, &ps->o.opacity_rules, endptr, (void *) val);
+}
+
 #ifdef CONFIG_LIBCONFIG
 /**
  * Get a file stream of the configuration file to read.
@@ -4479,7 +4946,7 @@ open_config_file(char *cpath, char **ppath) {
 /**
  * Parse a condition list in configuration file.
  */
-static void
+static inline void
 parse_cfg_condlst(session_t *ps, const config_t *pcfg, c2_lptr_t **pcondlst,
     const char *name) {
   config_setting_t *setting = config_lookup(pcfg, name);
@@ -4508,6 +4975,8 @@ parse_config(session_t *ps, struct options_tmp *pcfgtmp) {
   config_t cfg;
   int ival = 0;
   double dval = 0.0;
+  // libconfig manages string memory itself, so no need to manually free
+  // anything
   const char *sval = NULL;
 
   f = open_config_file(ps->o.config_file, &path);
@@ -4600,6 +5069,10 @@ parse_config(session_t *ps, struct options_tmp *pcfgtmp) {
   config_lookup_float(&cfg, "shadow-green", &ps->o.shadow_green);
   // --shadow-blue
   config_lookup_float(&cfg, "shadow-blue", &ps->o.shadow_blue);
+  // --shadow-exclude-reg
+  if (config_lookup_string(&cfg, "shadow-exclude-reg", &sval)
+      && !parse_geometry(ps, sval, &ps->o.shadow_exclude_reg_geom))
+    exit(1);
   // --inactive-opacity-override
   lcfg_lookup_bool(&cfg, "inactive-opacity-override",
       &ps->o.inactive_opacity_override);
@@ -4658,6 +5131,8 @@ parse_config(session_t *ps, struct options_tmp *pcfgtmp) {
   parse_cfg_condlst(ps, &cfg, &ps->o.invert_color_list, "invert-color-include");
   // --blur-background-exclude
   parse_cfg_condlst(ps, &cfg, &ps->o.blur_background_blacklist, "blur-background-exclude");
+  // --opacity-rule
+  parse_cfg_condlst(ps, &cfg, &ps->o.opacity_rules, "opacity-rule");
   // --blur-background
   lcfg_lookup_bool(&cfg, "blur-background", &ps->o.blur_background);
   // --blur-background-frame
@@ -4666,6 +5141,12 @@ parse_config(session_t *ps, struct options_tmp *pcfgtmp) {
   // --blur-background-fixed
   lcfg_lookup_bool(&cfg, "blur-background-fixed",
       &ps->o.blur_background_fixed);
+  // --blur-kern
+  if (config_lookup_string(&cfg, "blur-kern", &sval)
+      && !parse_conv_kern_lst(ps, sval, ps->o.blur_kerns, MAX_BLUR_PASS))
+    exit(1);
+  // --resize-damage
+  config_lookup_int(&cfg, "resize-damage", &ps->o.resize_damage);
   // --glx-no-stencil
   lcfg_lookup_bool(&cfg, "glx-no-stencil", &ps->o.glx_no_stencil);
   // --glx-copy-from-front
@@ -4678,6 +5159,8 @@ parse_config(session_t *ps, struct options_tmp *pcfgtmp) {
   if (config_lookup_string(&cfg, "glx-swap-method", &sval)
       && !parse_glx_swap_method(ps, sval))
     exit(1);
+  // --glx-use-gpushader4
+  lcfg_lookup_bool(&cfg, "glx-use-gpushader4", &ps->o.glx_use_gpushader4);
   // Wintype settings
   {
     wintype_t i;
@@ -4756,6 +5239,12 @@ get_cfg(session_t *ps, int argc, char *const *argv, bool first_pass) {
     { "glx-no-rebind-pixmap", no_argument, NULL, 298 },
     { "glx-swap-method", required_argument, NULL, 299 },
     { "fade-exclude", required_argument, NULL, 300 },
+    { "blur-kern", required_argument, NULL, 301 },
+    { "resize-damage", required_argument, NULL, 302 },
+    { "glx-use-gpushader4", no_argument, NULL, 303 },
+    { "opacity-rule", required_argument, NULL, 304 },
+    { "shadow-exclude-reg", required_argument, NULL, 305 },
+    { "paint-exclude", required_argument, NULL, 306 },
     // Must terminate with a NULL entry
     { NULL, 0, NULL, 0 },
   };
@@ -4775,7 +5264,7 @@ get_cfg(session_t *ps, int argc, char *const *argv, bool first_pass) {
       else if ('d' == o)
         ps->o.display = mstrcpy(optarg);
       else if ('?' == o || ':' == o)
-        usage();
+        usage(1);
     }
 
     // Check for abundant positional arguments
@@ -4816,7 +5305,7 @@ get_cfg(session_t *ps, int argc, char *const *argv, bool first_pass) {
 #define P_CASEBOOL(idx, option) case idx: ps->o.option = true; break
       // Short options
       case 'h':
-        usage();
+        usage(0);
         break;
       case 'd':
         break;
@@ -4979,8 +5468,32 @@ get_cfg(session_t *ps, int argc, char *const *argv, bool first_pass) {
         // --fade-exclude
         condlst_add(ps, &ps->o.fade_blacklist, optarg);
         break;
+      case 301:
+        // --blur-kern
+        if (!parse_conv_kern_lst(ps, optarg, ps->o.blur_kerns, MAX_BLUR_PASS))
+          exit(1);
+        break;
+      case 302:
+        // --resize-damage
+        ps->o.resize_damage = atoi(optarg);
+        break;
+      P_CASEBOOL(303, glx_use_gpushader4);
+      case 304:
+        // --opacity-rule
+        if (!parse_rule_opacity(ps, optarg))
+          exit(1);
+        break;
+      case 305:
+        // --shadow-exclude-reg
+        if (!parse_geometry(ps, optarg, &ps->o.shadow_exclude_reg_geom))
+          exit(1);
+        break;
+      case 306:
+        // --paint-exclude
+        condlst_add(ps, &ps->o.paint_blacklist, optarg);
+        break;
       default:
-        usage();
+        usage(1);
         break;
 #undef P_CASEBOOL
     }
@@ -5042,6 +5555,32 @@ get_cfg(session_t *ps, int argc, char *const *argv, bool first_pass) {
     ps->o.track_leader = true;
   }
 
+  // Fill default blur kernel
+  if (ps->o.blur_background && !ps->o.blur_kerns[0]) {
+    // Convolution filter parameter (box blur)
+    // gaussian or binomial filters are definitely superior, yet looks
+    // like they aren't supported as of xorg-server-1.13.0
+    const static XFixed convolution_blur[] = {
+      // Must convert to XFixed with XDoubleToFixed()
+      // Matrix size
+      XDoubleToFixed(3), XDoubleToFixed(3),
+      // Matrix
+      XDoubleToFixed(1), XDoubleToFixed(1), XDoubleToFixed(1),
+      XDoubleToFixed(1), XDoubleToFixed(1), XDoubleToFixed(1),
+      XDoubleToFixed(1), XDoubleToFixed(1), XDoubleToFixed(1),
+    };
+    ps->o.blur_kerns[0] = malloc(sizeof(convolution_blur));
+    if (!ps->o.blur_kerns[0]) {
+      printf_errf("(): Failed to allocate memory for convolution kernel.");
+      exit(1);
+    }
+    memcpy(ps->o.blur_kerns[0], &convolution_blur, sizeof(convolution_blur));
+  }
+
+  rebuild_shadow_exclude_reg(ps);
+
+  if (ps->o.resize_damage < 0)
+    printf_errf("(): Negative --resize-damage does not work correctly.");
 }
 
 /**
@@ -5371,6 +5910,19 @@ vsync_opengl_oml_wait(session_t *ps) {
 
   return 0;
 }
+
+static void
+vsync_opengl_swc_deinit(session_t *ps) {
+  // The standard says it doesn't accept 0, but in fact it probably does
+  if (ps->glx_context && ps->glXSwapIntervalProc)
+    ps->glXSwapIntervalProc(0);
+}
+
+static void
+vsync_opengl_mswc_deinit(session_t *ps) {
+  if (ps->glx_context && ps->glXSwapIntervalMESAProc)
+    ps->glXSwapIntervalMESAProc(0);
+}
 #endif
 
 /**
@@ -5397,6 +5949,16 @@ vsync_wait(session_t *ps) {
 
   if (VSYNC_FUNCS_WAIT[ps->o.vsync])
     VSYNC_FUNCS_WAIT[ps->o.vsync](ps);
+}
+
+/**
+ * Deinitialize current VSync method.
+ */
+void
+vsync_deinit(session_t *ps) {
+  if (ps->o.vsync && VSYNC_FUNCS_DEINIT[ps->o.vsync])
+    VSYNC_FUNCS_DEINIT[ps->o.vsync](ps);
+  ps->o.vsync = VSYNC_NONE;
 }
 
 /**
@@ -5820,7 +6382,10 @@ session_init(session_t *ps_old, int argc, char **argv) {
       .synchronize = false,
       .detect_rounded_corners = false,
       .paint_on_overlay = false,
+      .resize_damage = 0,
       .unredir_if_possible = false,
+      .redirected_force = UNSET,
+      .stoppaint_force = UNSET,
       .dbus = false,
       .benchmark = 0,
       .benchmark_wid = None,
@@ -5864,9 +6429,11 @@ session_init(session_t *ps_old, int argc, char **argv) {
       .blur_background_frame = false,
       .blur_background_fixed = false,
       .blur_background_blacklist = NULL,
+      .blur_kerns = { NULL },
       .inactive_dim = 0.0,
       .inactive_dim_fixed = false,
       .invert_color_list = NULL,
+      .opacity_rules = NULL,
 
       .wintype_focus = { false },
       .use_ewmh_active_win = false,
@@ -5886,10 +6453,9 @@ session_init(session_t *ps_old, int argc, char **argv) {
     .tmout_lst = NULL,
 
     .all_damage = None,
-    .all_damage_last = None,
+    .all_damage_last = { None },
     .time_start = { 0, 0 },
     .redirected = false,
-    .unredir_possible = false,
     .alpha_picts = NULL,
     .reg_ignore_expire = false,
     .idling = false,
@@ -5978,6 +6544,14 @@ session_init(session_t *ps_old, int argc, char **argv) {
   // Allocate a session and copy default values into it
   session_t *ps = malloc(sizeof(session_t));
   memcpy(ps, &s_def, sizeof(session_t));
+#ifdef CONFIG_VSYNC_OPENGL_GLSL
+  for (int i = 0; i < MAX_BLUR_PASS; ++i) {
+    glx_blur_pass_t *ppass = &ps->glx_blur_passes[i];
+    ppass->unifm_factor_center = -1;
+    ppass->unifm_offset_x = -1;
+    ppass->unifm_offset_y = -1;
+  }
+#endif
   ps_g = ps;
   ps->ignore_tail = &ps->ignore_head;
   gettimeofday(&ps->time_start, NULL);
@@ -6002,9 +6576,6 @@ session_init(session_t *ps_old, int argc, char **argv) {
     }
   }
 
-  // Second pass
-  get_cfg(ps, argc, argv, false);
-
   XSetErrorHandler(error);
   if (ps->o.synchronize) {
     XSynchronize(ps->dpy, 1);
@@ -6015,6 +6586,17 @@ session_init(session_t *ps_old, int argc, char **argv) {
 
   ps->vis = DefaultVisual(ps->dpy, ps->scr);
   ps->depth = DefaultDepth(ps->dpy, ps->scr);
+
+  // Start listening to events on root earlier to catch all possible
+  // root geometry changes
+  XSelectInput(ps->dpy, ps->root,
+    SubstructureNotifyMask
+    | ExposureMask
+    | StructureNotifyMask
+    | PropertyChangeMask);
+
+  ps->root_width = DisplayWidth(ps->dpy, ps->scr);
+  ps->root_height = DisplayHeight(ps->dpy, ps->scr);
 
   if (!XRenderQueryExtension(ps->dpy,
         &ps->render_event, &ps->render_error)) {
@@ -6053,6 +6635,9 @@ session_init(session_t *ps_old, int argc, char **argv) {
     ps->shape_exists = true;
   }
 
+  // Second pass
+  get_cfg(ps, argc, argv, false);
+
   // Query X RandR
   if (ps->o.sw_opti && !ps->o.refresh_rate) {
     if (XRRQueryExtension(ps->dpy, &ps->randr_event, &ps->randr_error))
@@ -6077,17 +6662,6 @@ session_init(session_t *ps_old, int argc, char **argv) {
     if (!ps->dbe_exists)
       ps->o.dbe = false;
   }
-
-  // Start listening to events on root earlier to catch all possible
-  // root geometry changes
-  XSelectInput(ps->dpy, ps->root,
-    SubstructureNotifyMask
-    | ExposureMask
-    | StructureNotifyMask
-    | PropertyChangeMask);
-
-  ps->root_width = DisplayWidth(ps->dpy, ps->scr);
-  ps->root_height = DisplayHeight(ps->dpy, ps->scr);
 
   rebuild_screen_reg(ps);
 
@@ -6277,6 +6851,9 @@ session_destroy(session_t *ps) {
   free_wincondlst(&ps->o.fade_blacklist);
   free_wincondlst(&ps->o.focus_blacklist);
   free_wincondlst(&ps->o.invert_color_list);
+  free_wincondlst(&ps->o.blur_background_blacklist);
+  free_wincondlst(&ps->o.opacity_rules);
+  free_wincondlst(&ps->o.paint_blacklist);
 #endif
 
   // Free tracked atom list
@@ -6330,7 +6907,8 @@ session_destroy(session_t *ps) {
   free_root_tile(ps);
   free_region(ps, &ps->screen_reg);
   free_region(ps, &ps->all_damage);
-  free_region(ps, &ps->all_damage_last);
+  for (int i = 0; i < CGLX_MAX_BUFFER_AGE; ++i)
+    free_region(ps, &ps->all_damage_last[i]);
   free(ps->expose_rects);
   free(ps->shadow_corner);
   free(ps->shadow_top);
@@ -6338,6 +6916,10 @@ session_destroy(session_t *ps) {
   free(ps->o.display);
   free(ps->o.logpath);
   free(ps->o.config_file);
+  for (int i = 0; i < MAX_BLUR_PASS; ++i) {
+    free(ps->o.blur_kerns[i]);
+    free(ps->blur_kerns_cache[i]);
+  }
   free(ps->pfds_read);
   free(ps->pfds_write);
   free(ps->pfds_except);
@@ -6399,7 +6981,7 @@ session_run(session_t *ps) {
   t = paint_preprocess(ps, ps->list);
 
   if (ps->redirected)
-    paint_all(ps, None, t);
+    paint_all(ps, None, None, t);
 
   // Initialize idling
   ps->idling = false;
@@ -6432,12 +7014,16 @@ session_run(session_t *ps) {
     t = paint_preprocess(ps, ps->list);
 
     // If the screen is unredirected, free all_damage to stop painting
-    if (!ps->redirected)
+    if (!ps->redirected || ON == ps->o.stoppaint_force)
       free_region(ps, &ps->all_damage);
 
+    XserverRegion all_damage_orig = None;
+    if (ps->o.resize_damage > 0)
+      all_damage_orig = copy_region(ps, ps->all_damage);
+    resize_region(ps, ps->all_damage, ps->o.resize_damage);
     if (ps->all_damage && !is_region_empty(ps, ps->all_damage, NULL)) {
       static int paint = 0;
-      paint_all(ps, ps->all_damage, t);
+      paint_all(ps, ps->all_damage, all_damage_orig, t);
       ps->reg_ignore_expire = false;
       paint++;
       if (ps->o.benchmark && paint >= ps->o.benchmark)
@@ -6445,6 +7031,7 @@ session_run(session_t *ps) {
       XSync(ps->dpy, False);
       ps->all_damage = None;
     }
+    free_region(ps, &all_damage_orig);
 
     if (ps->idling)
       ps->fade_time = 0L;

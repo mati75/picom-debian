@@ -582,6 +582,12 @@ cdbus_process(session_t *ps, DBusMessage *msg) {
       cdbus_reply_bool(ps, msg, true);
     success = true;
   }
+  else if (cdbus_m_ismethod("repaint")) {
+    force_repaint(ps);
+    if (!dbus_message_get_no_reply(msg))
+      cdbus_reply_bool(ps, msg, true);
+    success = true;
+  }
   else if (cdbus_m_ismethod("list_win")) {
     success = cdbus_process_list_win(ps, msg);
   }
@@ -604,6 +610,20 @@ cdbus_process(session_t *ps, DBusMessage *msg) {
   else if (dbus_message_is_method_call(msg,
         "org.freedesktop.DBus.Introspectable", "Introspect")) {
     success = cdbus_process_introspect(ps, msg);
+  }
+  else if (dbus_message_is_method_call(msg,
+        "org.freedesktop.DBus.Peer", "Ping")) {
+    cdbus_reply(ps, msg, NULL, NULL);
+    success = true;
+  }
+  else if (dbus_message_is_method_call(msg,
+        "org.freedesktop.DBus.Peer", "GetMachineId")) {
+    char *uuid = dbus_get_local_machine_id();
+    if (uuid) {
+      cdbus_reply_string(ps, msg, uuid);
+      dbus_free(uuid);
+      success = true;
+    }
   }
   else if (dbus_message_is_signal(msg, "org.freedesktop.DBus", "NameAcquired")
       || dbus_message_is_signal(msg, "org.freedesktop.DBus", "NameLost")) {
@@ -703,6 +723,7 @@ cdbus_process_win_get(session_t *ps, DBusMessage *msg) {
   cdbus_m_win_get_do(wmwin, cdbus_reply_bool);
   cdbus_m_win_get_do(leader, cdbus_reply_wid);
   cdbus_m_win_get_do(focused_real, cdbus_reply_bool);
+  cdbus_m_win_get_do(fade_force, cdbus_reply_enum);
   cdbus_m_win_get_do(shadow_force, cdbus_reply_enum);
   cdbus_m_win_get_do(focused_force, cdbus_reply_enum);
   cdbus_m_win_get_do(invert_color_force, cdbus_reply_enum);
@@ -756,8 +777,6 @@ cdbus_process_win_set(session_t *ps, DBusMessage *msg) {
     return true;
   }
 
-  ps->ev_received = true;
-
 #define cdbus_m_win_set_do(tgt, type, real_type) \
   if (!strcmp(MSTR(tgt), target)) { \
     real_type val; \
@@ -772,6 +791,14 @@ cdbus_process_win_set(session_t *ps, DBusMessage *msg) {
     if (!cdbus_msg_get_arg(msg, 2, CDBUS_TYPE_ENUM, &val))
       return false;
     win_set_shadow_force(ps, w, val);
+    goto cdbus_process_win_set_success;
+  }
+
+  if (!strcmp("fade_force", target)) {
+    cdbus_enum_t val = UNSET;
+    if (!cdbus_msg_get_arg(msg, 2, CDBUS_TYPE_ENUM, &val))
+      return false;
+    win_set_fade_force(ps, w, val);
     goto cdbus_process_win_set_success;
   }
 
@@ -871,6 +898,8 @@ cdbus_process_opts_get(session_t *ps, DBusMessage *msg) {
   cdbus_m_opts_get_do(detect_rounded_corners, cdbus_reply_bool);
   cdbus_m_opts_get_do(paint_on_overlay, cdbus_reply_bool);
   cdbus_m_opts_get_do(unredir_if_possible, cdbus_reply_bool);
+  cdbus_m_opts_get_do(redirected_force, cdbus_reply_enum);
+  cdbus_m_opts_get_do(stoppaint_force, cdbus_reply_enum);
   cdbus_m_opts_get_do(logpath, cdbus_reply_string);
   cdbus_m_opts_get_do(synchronize, cdbus_reply_bool);
 
@@ -898,6 +927,11 @@ cdbus_process_opts_get(session_t *ps, DBusMessage *msg) {
   cdbus_m_opts_get_do(shadow_opacity, cdbus_reply_double);
   cdbus_m_opts_get_do(clear_shadow, cdbus_reply_bool);
 
+  cdbus_m_opts_get_do(fade_delta, cdbus_reply_int32);
+  cdbus_m_opts_get_do(fade_in_step, cdbus_reply_int32);
+  cdbus_m_opts_get_do(fade_out_step, cdbus_reply_int32);
+  cdbus_m_opts_get_do(no_fading_openclose, cdbus_reply_bool);
+
   cdbus_m_opts_get_do(blur_background, cdbus_reply_bool);
   cdbus_m_opts_get_do(blur_background_frame, cdbus_reply_bool);
   cdbus_m_opts_get_do(blur_background_fixed, cdbus_reply_bool);
@@ -914,11 +948,7 @@ cdbus_process_opts_get(session_t *ps, DBusMessage *msg) {
   cdbus_m_opts_get_do(glx_copy_from_front, cdbus_reply_bool);
   cdbus_m_opts_get_do(glx_use_copysubbuffermesa, cdbus_reply_bool);
   cdbus_m_opts_get_do(glx_no_rebind_pixmap, cdbus_reply_bool);
-  if (!strcmp("glx_swap_method", target)) {
-    assert(ps->o.glx_swap_method < sizeof(GLX_SWAP_METHODS_STRS) / sizeof(GLX_SWAP_METHODS_STRS[0]));
-    cdbus_reply_string(ps, msg, GLX_SWAP_METHODS_STRS[ps->o.glx_swap_method]);
-    return true;
-  }
+  cdbus_m_opts_get_do(glx_swap_method, cdbus_reply_int32);
 #endif
 
   cdbus_m_opts_get_do(track_focus, cdbus_reply_bool);
@@ -949,6 +979,42 @@ cdbus_process_opts_set(session_t *ps, DBusMessage *msg) {
       return false; \
     ps->o.tgt = val; \
     goto cdbus_process_opts_set_success; \
+  }
+
+  // fade_delta
+  if (!strcmp("fade_delta", target)) {
+    int32_t val = 0.0;
+    if (!cdbus_msg_get_arg(msg, 1, DBUS_TYPE_INT32, &val))
+      return false;
+    ps->o.fade_delta = max_i(val, 1);
+    goto cdbus_process_opts_set_success;
+  }
+
+  // fade_in_step
+  if (!strcmp("fade_in_step", target)) {
+    double val = 0.0;
+    if (!cdbus_msg_get_arg(msg, 1, DBUS_TYPE_DOUBLE, &val))
+      return false;
+    ps->o.fade_in_step = normalize_d(val) * OPAQUE;
+    goto cdbus_process_opts_set_success;
+  }
+
+  // fade_out_step
+  if (!strcmp("fade_out_step", target)) {
+    double val = 0.0;
+    if (!cdbus_msg_get_arg(msg, 1, DBUS_TYPE_DOUBLE, &val))
+      return false;
+    ps->o.fade_out_step = normalize_d(val) * OPAQUE;
+    goto cdbus_process_opts_set_success;
+  }
+
+  // no_fading_openclose
+  if (!strcmp("no_fading_openclose", target)) {
+    dbus_bool_t val = FALSE;
+    if (!cdbus_msg_get_arg(msg, 1, DBUS_TYPE_BOOLEAN, &val))
+      return false;
+    opts_set_no_fading_openclose(ps, val);
+    goto cdbus_process_opts_set_success;
   }
 
   // unredir_if_possible
@@ -992,6 +1058,7 @@ cdbus_process_opts_set(session_t *ps, DBusMessage *msg) {
     const char * val = NULL;
     if (!cdbus_msg_get_arg(msg, 1, DBUS_TYPE_STRING, &val))
       return false;
+    vsync_deinit(ps);
     if (!parse_vsync(ps, val)) {
       printf_errf("(): " CDBUS_ERROR_BADARG_S, 1, "Value invalid.");
       cdbus_reply_err(ps, msg, CDBUS_ERROR_BADARG, CDBUS_ERROR_BADARG_S, 1, "Value invalid.");
@@ -1004,6 +1071,19 @@ cdbus_process_opts_set(session_t *ps, DBusMessage *msg) {
       goto cdbus_process_opts_set_success;
     return true;
   }
+
+  // redirected_force
+  if (!strcmp("redirected_force", target)) {
+    cdbus_enum_t val = UNSET;
+    if (!cdbus_msg_get_arg(msg, 1, CDBUS_TYPE_ENUM, &val))
+      return false;
+    ps->o.redirected_force = val;
+    force_repaint(ps);
+    goto cdbus_process_opts_set_success;
+  }
+
+  // stoppaint_force
+  cdbus_m_opts_set_do(stoppaint_force, CDBUS_TYPE_ENUM, cdbus_enum_t);
 
 #undef cdbus_m_opts_set_do
 
@@ -1032,6 +1112,12 @@ cdbus_process_introspect(session_t *ps, DBusMessage *msg) {
     "      <arg name='data' direction='out' type='s' />\n"
     "    </method>\n"
     "  </interface>\n"
+    "  <interface name='org.freedesktop.DBus.Peer'>\n"
+    "    <method name='Ping' />\n"
+    "    <method name='GetMachineId'>\n"
+    "      <arg name='machine_uuid' direction='out' type='s' />\n"
+    "    </method>\n"
+    "  </interface>\n"
     "  <interface name='" CDBUS_INTERFACE_NAME "'>\n"
     "    <signal name='win_added'>\n"
     "      <arg name='wid' type='" CDBUS_TYPE_WINDOW_STR "'/>\n"
@@ -1052,6 +1138,7 @@ cdbus_process_introspect(session_t *ps, DBusMessage *msg) {
     "      <arg name='wid' type='" CDBUS_TYPE_WINDOW_STR "'/>\n"
     "    </signal>\n"
     "    <method name='reset' />\n"
+    "    <method name='repaint' />\n"
     "  </interface>\n"
     "</node>\n";
 

@@ -2,11 +2,27 @@ Source: compton
 Section: x11
 Priority: extra
 Maintainer: Scott Leggett <scott@sl.id.au>
-Build-Depends: debhelper (>= 9.0.0), hardening-wrapper, libx11-dev,
- libxcomposite-dev, libxdamage-dev, libxfixes-dev, libxext-dev, libxrender-dev,
- libxrandr-dev, pkg-config, libpcre3-dev, libconfig-dev, libdrm-dev,
- libgl1-mesa-dev, libdbus-1-dev, asciidoc, libxml2-utils, docbook-xml,
- xsltproc, docbook-xsl
+Build-Depends:
+ asciidoc,
+ debhelper (>= 9.0.0),
+ docbook-xml,
+ docbook-xsl,
+ hardening-wrapper,
+ libconfig-dev,
+ libdbus-1-dev,
+ libdrm-dev,
+ libgl1-mesa-dev,
+ libpcre3-dev,
+ libx11-dev,
+ libxcomposite-dev,
+ libxdamage-dev,
+ libxext-dev,
+ libxfixes-dev,
+ libxml2-utils,
+ libxrandr-dev,
+ libxrender-dev,
+ pkg-config,
+ xsltproc
 Standards-Version: 3.9.4
 Homepage: https://github.com/chjj/compton
 Vcs-Git: git://github.com/smlx/package-compton.git
@@ -14,7 +30,11 @@ Vcs-Browser: https://github.com/smlx/package-compton
 
 Package: compton
 Architecture: any
-Depends: ${shlibs:Depends}, ${misc:Depends}
+Depends:
+ ${misc:Depends},
+ ${shlibs:Depends}
+Pre-Depends:
+ dpkg (>= 1.15.6~)
 Description: Compositor for X11, based on xcompmgr
  compton is a compositor for X11, based on xcompmgr. In addition to shadows,
  fading and translucency, compton implements window frame opacity control,

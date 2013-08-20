@@ -112,6 +112,41 @@ array_wid_exists(const Window *arr, int count, Window wid) {
 }
 
 /**
+ * Convert a geometry_t value to XRectangle.
+ */
+static inline XRectangle
+geom_to_rect(session_t *ps, const geometry_t *src, const XRectangle *def) {
+  XRectangle rect_def = { .x = 0, .y = 0,
+    .width = ps->root_width, .height = ps->root_height };
+  if (!def) def = &rect_def;
+
+  XRectangle rect = { .x = src->x, .y = src->y,
+    .width = src->wid, .height = src->hei };
+  if (src->wid < 0) rect.width = def->width;
+  if (src->hei < 0) rect.height = def->height;
+  if (-1 == src->x) rect.x = def->x;
+  else if (src->x < 0) rect.x = ps->root_width + rect.x + 2 - rect.width;
+  if (-1 == src->y) rect.y = def->y;
+  else if (src->y < 0) rect.y = ps->root_height + rect.y + 2 - rect.height;
+  return rect;
+}
+
+/**
+ * Convert a XRectangle to a XServerRegion.
+ */
+static inline XserverRegion
+rect_to_reg(session_t *ps, const XRectangle *src) {
+  if (!src) return None;
+  XRectangle bound = { .x = 0, .y = 0,
+    .width = ps->root_width, .height = ps->root_height };
+  XRectangle res = { };
+  rect_crop(&res, src, &bound);
+  if (res.width && res.height)
+    return XFixesCreateRegion(ps->dpy, &res, 1);
+  return None;
+}
+
+/**
  * Destroy a <code>Picture</code>.
  */
 inline static void
@@ -146,16 +181,16 @@ free_damage(session_t *ps, Damage *p) {
   }
 }
 
-#ifdef CONFIG_C2
 /**
  * Destroy a condition list.
  */
 static inline void
 free_wincondlst(c2_lptr_t **pcondlst) {
+#ifdef CONFIG_C2
   while ((*pcondlst = c2_free_lptr(*pcondlst)))
     continue;
-}
 #endif
+}
 
 /**
  * Check whether a paint_t contains enough data.
@@ -231,6 +266,9 @@ free_win_res(session_t *ps, win *w) {
   free(w->class_instance);
   free(w->class_general);
   free(w->role);
+#ifdef CONFIG_VSYNC_OPENGL_GLSL
+  free_glx_bc(ps, &w->glx_blur_cache);
+#endif
 }
 
 /**
@@ -412,6 +450,17 @@ win_has_frame(const win *w) {
     || w->top_width || w->left_width || w->right_width || w->bottom_width;
 }
 
+static inline void
+wid_set_opacity_prop(session_t *ps, Window wid, long val) {
+  XChangeProperty(ps->dpy, wid, ps->atom_opacity, XA_CARDINAL, 32,
+      PropModeReplace, (unsigned char *) &val, 1);
+}
+
+static inline void
+wid_rm_opacity_prop(session_t *ps, Window wid) {
+  XDeleteProperty(ps->dpy, wid, ps->atom_opacity);
+}
+
 /**
  * Dump an drawable's info.
  */
@@ -429,22 +478,35 @@ dump_drawable(session_t *ps, Drawable drawable) {
   }
 }
 
-/**
- * Check if a window is a fullscreen window.
- *
- * It's not using w->border_size for performance measures.
- */
-static inline bool
-win_is_fullscreen(session_t *ps, const win *w) {
-  return rect_is_fullscreen(ps, w->a.x, w->a.y, w->widthb, w->heightb)
-      && !w->bounding_shaped;
-}
-
 static void
 win_rounded_corners(session_t *ps, win *w);
 
-static void
-win_validate_pixmap(session_t *ps, win *w);
+/**
+ * Validate a pixmap.
+ *
+ * Detect whether the pixmap is valid with XGetGeometry. Well, maybe there
+ * are better ways.
+ */
+static inline bool
+validate_pixmap(session_t *ps, Pixmap pxmap) {
+  if (!pxmap) return false;
+
+  Window rroot = None;
+  int rx = 0, ry = 0;
+  unsigned rwid = 0, rhei = 0, rborder = 0, rdepth = 0;
+  return XGetGeometry(ps->dpy, pxmap, &rroot, &rx, &ry,
+        &rwid, &rhei, &rborder, &rdepth) && rwid && rhei;
+}
+
+/**
+ * Validate pixmap of a window, and destroy pixmap and picture if invalid.
+ */
+static inline void
+win_validate_pixmap(session_t *ps, win *w) {
+  // Destroy pixmap and picture, if invalid
+  if (!validate_pixmap(ps, w->paint.pixmap))
+    free_paint(ps, &w->paint);
+}
 
 /**
  * Wrapper of c2_match().
@@ -570,8 +632,26 @@ set_tgt_clip(session_t *ps, XserverRegion reg, const reg_data_t *pcache_reg) {
   }
 }
 
+static bool
+xr_blur_dst(session_t *ps, Picture tgt_buffer,
+    int x, int y, int wid, int hei, XFixed **blur_kerns,
+    XserverRegion reg_clip);
+
+/**
+ * Normalize a convolution kernel.
+ */
+static inline void
+normalize_conv_kern(int wid, int hei, XFixed *kern) {
+  double sum = 0.0;
+  for (int i = 0; i < wid * hei; ++i)
+    sum += XFixedToDouble(kern[i]);
+  double factor = 1.0 / sum;
+  for (int i = 0; i < wid * hei; ++i)
+    kern[i] = XDoubleToFixed(XFixedToDouble(kern[i]) * factor);
+}
+
 static void
-paint_all(session_t *ps, XserverRegion region, win *t);
+paint_all(session_t *ps, XserverRegion region, XserverRegion region_real, win *t);
 
 static void
 add_damage(session_t *ps, XserverRegion damage);
@@ -789,7 +869,7 @@ ev_window(session_t *ps, XEvent *ev);
 #endif
 
 static void __attribute__ ((noreturn))
-usage(void);
+usage(int ret);
 
 static bool
 register_cm(session_t *ps);
@@ -851,18 +931,68 @@ get_screen_region(session_t *ps) {
 }
 
 /**
+ * Resize a region.
+ */
+static inline void
+resize_region(session_t *ps, XserverRegion region, short mod) {
+  if (!mod || !region) return;
+
+  int nrects = 0, nnewrects = 0;
+  XRectangle *newrects = NULL;
+  XRectangle *rects = XFixesFetchRegion(ps->dpy, region, &nrects);
+  if (!rects || !nrects)
+    goto resize_region_end;
+
+  // Allocate memory for new rectangle list, because I don't know if it's
+  // safe to write in the memory Xlib allocates
+  newrects = calloc(nrects, sizeof(XRectangle));
+  if (!newrects) {
+    printf_errf("(): Failed to allocate memory.");
+    exit(1);
+  }
+
+  // Loop through all rectangles
+  for (int i = 0; i < nrects; ++i) {
+    int x1 = max_i(rects[i].x - mod, 0);
+    int y1 = max_i(rects[i].y - mod, 0);
+    int x2 = min_i(rects[i].x + rects[i].width + mod, ps->root_width);
+    int y2 = min_i(rects[i].y + rects[i].height + mod, ps->root_height);
+    int wid = x2 - x1;
+    int hei = y2 - y1;
+    if (wid <= 0 || hei <= 0)
+      continue;
+    newrects[nnewrects].x = x1;
+    newrects[nnewrects].y = y1;
+    newrects[nnewrects].width = wid;
+    newrects[nnewrects].height = hei;
+    ++nnewrects;
+  }
+
+  // Set region
+  XFixesSetRegion(ps->dpy, region, newrects, nnewrects);
+
+resize_region_end:
+  cxfree(rects);
+  free(newrects);
+}
+
+/**
  * Dump a region.
  */
 static inline void
 dump_region(const session_t *ps, XserverRegion region) {
-  int nrects = 0, i;
-  XRectangle *rects = XFixesFetchRegion(ps->dpy, region, &nrects);
-  if (!rects)
-    return;
+  int nrects = 0;
+  XRectangle *rects = NULL;
+  if (!rects && region)
+    rects = XFixesFetchRegion(ps->dpy, region, &nrects);
 
-  for (i = 0; i < nrects; ++i)
+  printf_dbgf("(%#010lx): %d rects\n", region, nrects);
+  if (!rects) return;
+  for (int i = 0; i < nrects; ++i)
     printf("Rect #%d: %8d, %8d, %8d, %8d\n", i, rects[i].x, rects[i].y,
         rects[i].width, rects[i].height);
+  putchar('\n');
+  fflush(stdout);
 
   cxfree(rects);
 }
@@ -1021,6 +1151,12 @@ vsync_opengl_wait(session_t *ps);
 
 static int
 vsync_opengl_oml_wait(session_t *ps);
+
+static void
+vsync_opengl_swc_deinit(session_t *ps);
+
+static void
+vsync_opengl_mswc_deinit(session_t *ps);
 #endif
 
 static void

@@ -33,8 +33,6 @@ Architecture: any
 Depends:
  ${misc:Depends},
  ${shlibs:Depends}
-Pre-Depends:
- dpkg (>= 1.15.6~)
 Description: compositor for X11, based on xcompmgr
  compton is a compositor for X11, based on xcompmgr. In addition to shadows,
  fading and translucency, compton implements window frame opacity control,

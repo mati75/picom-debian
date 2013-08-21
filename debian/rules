@@ -1,11 +1,8 @@
 #!/usr/bin/make -f
 # -*- makefile -*-
 
-# Enable build-hardening
-export DEB_BUILD_HARDENING = 1
-
 # Set binary version
-export COMPTON_VERSION = 0.0.1+git-85e7d18-2013-04-21
+export COMPTON_VERSION = 0.1~beta1
 
 %:
 	dh $@

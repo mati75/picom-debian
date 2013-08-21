@@ -1,6 +1,5 @@
 compton (0.1~beta1-1) unstable; urgency=low
 
-  * Imported Upstream version 0.1~beta1
   * Initial release (Closes: #679551)
 
- -- Scott Leggett <scott@sl.id.au>  Tue, 20 Aug 2013 22:28:55 +1000
+ -- Scott Leggett <scott@sl.id.au>  Wed, 21 Aug 2013 20:13:37 +1000

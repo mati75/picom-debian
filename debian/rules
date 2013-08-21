@@ -1,5 +1,4 @@
 #!/usr/bin/make -f
-# -*- makefile -*-
 
 # Set binary version
 export COMPTON_VERSION = 0.1~beta1

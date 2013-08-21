@@ -1,0 +1,25 @@
+From: Scott Leggett <scott@sl.id.au>
+Date: Wed, 21 Aug 2013 21:11:53 +1000
+Subject: Use CPPFLAGS during build.
+
+---
+ Makefile |    4 ++--
+ 1 file changed, 2 insertions(+), 2 deletions(-)
+
+diff --git a/Makefile b/Makefile
+index 5207fd9..de953ec 100644
+--- a/Makefile
++++ b/Makefile
+@@ -105,10 +105,10 @@ src/.clang_complete: Makefile
+ 	@(for i in $(filter-out -O% -DNDEBUG, $(CFG) $(CFLAGS) $(INCS)); do echo "$$i"; done) > $@
+ 
+ %.o: src/%.c src/%.h src/common.h
+-	$(CC) $(CFG) $(CFLAGS) $(INCS) -c src/$*.c
++	$(CC) $(CFG) $(CPPFLAGS) $(CFLAGS) $(INCS) -c src/$*.c
+ 
+ compton: $(OBJS)
+-	$(CC) $(CFG) $(LDFLAGS) $(CFLAGS) -o $@ $(OBJS) $(LIBS)
++	$(CC) $(CFG) $(LDFLAGS) $(CPPFLAGS) $(CFLAGS) -o $@ $(OBJS) $(LIBS)
+ 
+ man/%.1: man/%.1.asciidoc
+ 	a2x --format manpage $<

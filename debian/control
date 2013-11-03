@@ -7,7 +7,6 @@ Build-Depends:
  debhelper (>= 9.0.0),
  docbook-xml,
  docbook-xsl,
- hardening-wrapper,
  libconfig-dev,
  libdbus-1-dev,
  libdrm-dev,

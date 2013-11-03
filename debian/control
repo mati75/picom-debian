@@ -17,6 +17,7 @@ Build-Depends:
  libxdamage-dev,
  libxext-dev,
  libxfixes-dev,
+ libxinerama-dev,
  libxml2-utils,
  libxrandr-dev,
  libxrender-dev,

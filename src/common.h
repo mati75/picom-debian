@@ -30,6 +30,7 @@
 // #define DEBUG_GLX_GLSL   1
 // #define DEBUG_GLX_ERR    1
 // #define DEBUG_GLX_MARK   1
+// #define DEBUG_GLX_PAINTREG 1
 // #define MONITOR_REPAINT  1
 
 // Whether to enable PCRE regular expression support in blacklists, enabled
@@ -84,6 +85,10 @@
 #include <X11/extensions/shape.h>
 #include <X11/extensions/Xrandr.h>
 #include <X11/extensions/Xdbe.h>
+
+#ifdef CONFIG_XINERAMA
+#include <X11/extensions/Xinerama.h>
+#endif
 
 // Workarounds for missing definitions in very old versions of X headers,
 // thanks to consolers for reporting
@@ -460,6 +465,11 @@ typedef struct {
   /// Whether to unredirect all windows if a full-screen opaque window
   /// is detected.
   bool unredir_if_possible;
+  /// List of conditions of windows to ignore as a full-screen window
+  /// when determining if a window could be unredirected.
+  c2_lptr_t *unredir_if_possible_blacklist;
+  /// Delay before unredirecting screen.
+  time_ms_t unredir_if_possible_delay;
   /// Forced redirection setting through D-Bus.
   switch_t redirected_force;
   /// Whether to stop painting. Controlled through D-Bus.
@@ -506,6 +516,8 @@ typedef struct {
   bool shadow_ignore_shaped;
   /// Whether to respect _COMPTON_SHADOW.
   bool respect_prop_shadow;
+  /// Whether to crop shadow to the very Xinerama screen.
+  bool xinerama_shadow_crop;
 
   // === Fading ===
   /// Enable/disable fading for specific window types.
@@ -638,6 +650,10 @@ typedef struct {
   int nfds_max;
   /// Linked list of all timeouts.
   struct _timeout_t *tmout_lst;
+  /// Timeout for delayed unredirection.
+  struct _timeout_t *tmout_unredir;
+  /// Whether we have hit unredirection timeout.
+  bool tmout_unredir_hit;
   /// Whether we have received an event in this cycle.
   bool ev_received;
   /// Whether the program is idling. I.e. no fading, no potential window
@@ -806,6 +822,16 @@ typedef struct {
 #endif
   /// Whether X DBE extension exists.
   bool dbe_exists;
+#ifdef CONFIG_XINERAMA
+  /// Whether X Xinerama extension exists.
+  bool xinerama_exists;
+  /// Xinerama screen info.
+  XineramaScreenInfo *xinerama_scrs;
+  /// Xinerama screen regions.
+  XserverRegion *xinerama_scr_regs;
+  /// Number of Xinerama screens.
+  int xinerama_nscrs;
+#endif
   /// Whether X Render convolution filter exists.
   bool xrfilter_convolution_exists;
 
@@ -861,6 +887,10 @@ typedef struct _win {
   Window id;
   /// Window attributes.
   XWindowAttributes a;
+#ifdef CONFIG_XINERAMA
+  /// Xinerama screen this window is on.
+  int xinerama_scr;
+#endif
   /// Window visual pict format;
   XRenderPictFormat *pictfmt;
   /// Window painting mode.
@@ -901,6 +931,8 @@ typedef struct _win {
   bool to_paint;
   /// Whether the window is painting excluded.
   bool paint_excluded;
+  /// Whether the window is unredirect-if-possible excluded.
+  bool unredir_if_possible_excluded;
   /// Whether this window is in open/close state.
   bool in_openclose;
 
@@ -923,8 +955,6 @@ typedef struct _win {
   bool focused;
   /// Override value of window focus state. Set by D-Bus method calls.
   switch_t focused_force;
-  /// Whether the window is actually focused.
-  bool focused_real;
 
   // Blacklist related members
   /// Name of the window.
@@ -942,6 +972,7 @@ typedef struct _win {
   const c2_lptr_t *cache_bbblst;
   const c2_lptr_t *cache_oparule;
   const c2_lptr_t *cache_pblst;
+  const c2_lptr_t *cache_uipblst;
 
   // Opacity-related members
   /// Current window opacity.
@@ -1107,12 +1138,13 @@ XFixesDestroyRegion_(Display *dpy, XserverRegion reg,
 /**
  * @brief Quit if the passed-in pointer is empty.
  */
-static inline void
+static inline void *
 allocchk_(const char *func_name, void *ptr) {
   if (!ptr) {
     printf_err("%s(): Failed to allocate memory.", func_name);
     exit(1);
   }
+  return ptr;
 }
 
 /// @brief Wrapper of allocchk_().
@@ -1506,6 +1538,9 @@ timeout_invoke(session_t *ps, timeout_t *ptmout);
 bool
 timeout_drop(session_t *ps, timeout_t *prm);
 
+void
+timeout_reset(session_t *ps, timeout_t *ptmout);
+
 /**
  * Add a file descriptor to a select() fd_set.
  */
@@ -1660,25 +1695,29 @@ find_toplevel(session_t *ps, Window id) {
 }
 
 /**
+ * Check if a window is really focused.
+ */
+static inline bool
+win_is_focused_real(session_t *ps, const win *w) {
+  return IsViewable == w->a.map_state && ps->active_win == w;
+}
+
+/**
  * Find out the currently focused window.
  *
  * @return struct _win object of the found window, NULL if not found
  */
 static inline win *
 find_focused(session_t *ps) {
-  if (!ps->o.track_focus)
-    return NULL;
+  if (!ps->o.track_focus) return NULL;
 
-  for (win *w = ps->list; w; w = w->next) {
-    if (w->focused_real && !w->destroyed)
-      return w;
-  }
-
+  if (ps->active_win && win_is_focused_real(ps, ps->active_win))
+    return ps->active_win;
   return NULL;
 }
 
 /**
- * Copies a region
+ * Copies a region.
  */
 static inline XserverRegion
 copy_region(const session_t *ps, XserverRegion oldregion) {

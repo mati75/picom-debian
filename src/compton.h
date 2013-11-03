@@ -193,6 +193,23 @@ free_wincondlst(c2_lptr_t **pcondlst) {
 }
 
 /**
+ * Free Xinerama screen info.
+ */
+static inline void
+free_xinerama_info(session_t *ps) {
+#ifdef CONFIG_XINERAMA
+  if (ps->xinerama_scr_regs) {
+    for (int i = 0; i < ps->xinerama_nscrs; ++i)
+      free_region(ps, &ps->xinerama_scr_regs[i]);
+    free(ps->xinerama_scr_regs);
+  }
+  cxfree(ps->xinerama_scrs);
+  ps->xinerama_scrs = NULL;
+  ps->xinerama_nscrs = 0;
+#endif
+}
+
+/**
  * Check whether a paint_t contains enough data.
  */
 static inline bool
@@ -305,6 +322,14 @@ ms_to_tv(int timeout) {
     .tv_sec = timeout / MS_PER_SEC,
     .tv_usec = timeout % MS_PER_SEC * (US_PER_SEC / MS_PER_SEC)
   };
+}
+
+/**
+ * Whether an event is DamageNotify.
+ */
+static inline bool
+isdamagenotify(session_t *ps, const XEvent *ev) {
+  return ps->damage_event + XDamageNotify == ev->type;
 }
 
 /**
@@ -451,9 +476,10 @@ win_has_frame(const win *w) {
 }
 
 static inline void
-wid_set_opacity_prop(session_t *ps, Window wid, long val) {
+wid_set_opacity_prop(session_t *ps, Window wid, opacity_t val) {
+  const unsigned long v = val;
   XChangeProperty(ps->dpy, wid, ps->atom_opacity, XA_CARDINAL, 32,
-      PropModeReplace, (unsigned char *) &val, 1);
+      PropModeReplace, (unsigned char *) &v, 1);
 }
 
 static inline void
@@ -538,6 +564,20 @@ clear_cache_win_leaders(session_t *ps) {
 static win *
 find_toplevel2(session_t *ps, Window wid);
 
+/**
+ * Find matched window.
+ */
+static inline win *
+find_win_all(session_t *ps, const Window wid) {
+  if (!wid || PointerRoot == wid || wid == ps->root || wid == ps->overlay)
+    return NULL;
+
+  win *w = find_win(ps, wid);
+  if (!w) w = find_toplevel(ps, wid);
+  if (!w) w = find_toplevel2(ps, wid);
+  return w;
+}
+
 static Window
 win_get_leader_raw(session_t *ps, win *w, int recursions);
 
@@ -564,7 +604,7 @@ group_is_focused(session_t *ps, Window leader) {
 
   for (win *w = ps->list; w; w = w->next) {
     if (win_get_leader(ps, w) == leader && !w->destroyed
-        && w->focused_real)
+        && win_is_focused_real(ps, w))
       return true;
   }
 
@@ -740,6 +780,9 @@ static inline void
 win_set_focused(session_t *ps, win *w, bool focused);
 
 static void
+win_on_focus_change(session_t *ps, win *w);
+
+static void
 win_determine_fade(session_t *ps, win *w);
 
 static void
@@ -777,6 +820,9 @@ calc_win_size(session_t *ps, win *w);
 
 static void
 calc_shadow_geometry(session_t *ps, win *w);
+
+static void
+win_upd_wintype(session_t *ps, win *w);
 
 static void
 win_mark_client(session_t *ps, win *w, Window client);
@@ -1189,7 +1235,38 @@ static void
 timeout_clear(session_t *ps);
 
 static bool
+tmout_unredir_callback(session_t *ps, timeout_t *tmout);
+
+static bool
 mainloop(session_t *ps);
+
+#ifdef CONFIG_XINERAMA
+static void
+cxinerama_upd_scrs(session_t *ps);
+#endif
+
+/**
+ * Get the Xinerama screen a window is on.
+ *
+ * Return an index >= 0, or -1 if not found.
+ */
+static inline void
+cxinerama_win_upd_scr(session_t *ps, win *w) {
+#ifdef CONFIG_XINERAMA
+  w->xinerama_scr = -1;
+  for (XineramaScreenInfo *s = ps->xinerama_scrs;
+      s < ps->xinerama_scrs + ps->xinerama_nscrs; ++s)
+    if (s->x_org <= w->a.x && s->y_org <= w->a.y
+        && s->x_org + s->width >= w->a.x + w->widthb
+        && s->y_org + s->height >= w->a.y + w->heightb) {
+      w->xinerama_scr = s - ps->xinerama_scrs;
+      return;
+    }
+#endif
+}
+
+static void
+cxinerama_upd_scrs(session_t *ps);
 
 static session_t *
 session_init(session_t *ps_old, int argc, char **argv);

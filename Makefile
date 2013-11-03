@@ -17,6 +17,12 @@ OBJS = compton.o
 # === Configuration flags ===
 CFG = -std=c99
 
+# ==== Xinerama ====
+ifeq "$(NO_XINERAMA)" ""
+  CFG += -DCONFIG_XINERAMA
+  PACKAGES += xinerama
+endif
+
 # ==== libconfig ====
 ifeq "$(NO_LIBCONFIG)" ""
   CFG += -DCONFIG_LIBCONFIG
@@ -43,7 +49,7 @@ ifeq "$(NO_VSYNC_DRM)" ""
   CFG += -DCONFIG_VSYNC_DRM
 endif
 
-# ==== OpenGL VSync ====
+# ==== OpenGL ====
 ifeq "$(NO_VSYNC_OPENGL)" ""
   CFG += -DCONFIG_VSYNC_OPENGL
   # -lGL must precede some other libraries, or it segfaults on FreeBSD (#74)
@@ -103,13 +109,13 @@ MANPAGES_HTML = $(addsuffix .html,$(MANPAGES))
 .DEFAULT_GOAL := compton
 
 src/.clang_complete: Makefile
-	@(for i in $(filter-out -O% -DNDEBUG, $(CFG) $(CFLAGS) $(INCS)); do echo "$$i"; done) > $@
+	@(for i in $(filter-out -O% -DNDEBUG, $(CFG) $(CPPFLAGS) $(CFLAGS) $(INCS)); do echo "$$i"; done) > $@
 
 %.o: src/%.c src/%.h src/common.h
-	$(CC) $(CFG) $(CFLAGS) $(INCS) -c src/$*.c
+	$(CC) $(CFG) $(CPPFLAGS) $(CFLAGS) $(INCS) -c src/$*.c
 
 compton: $(OBJS)
-	$(CC) $(CFG) $(LDFLAGS) $(CFLAGS) -o $@ $(OBJS) $(LIBS)
+	$(CC) $(CFG) $(CPPFLAGS) $(LDFLAGS) $(CFLAGS) -o $@ $(OBJS) $(LIBS)
 
 man/%.1: man/%.1.asciidoc
 	a2x --format manpage $<

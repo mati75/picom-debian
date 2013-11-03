@@ -722,7 +722,11 @@ cdbus_process_win_get(session_t *ps, DBusMessage *msg) {
   cdbus_m_win_get_do(window_type, cdbus_reply_enum);
   cdbus_m_win_get_do(wmwin, cdbus_reply_bool);
   cdbus_m_win_get_do(leader, cdbus_reply_wid);
-  cdbus_m_win_get_do(focused_real, cdbus_reply_bool);
+  // focused_real
+  if (!strcmp("focused_real", target)) {
+    cdbus_reply_bool(ps, msg, win_is_focused_real(ps, w));
+    return true;
+  }
   cdbus_m_win_get_do(fade_force, cdbus_reply_enum);
   cdbus_m_win_get_do(shadow_force, cdbus_reply_enum);
   cdbus_m_win_get_do(focused_force, cdbus_reply_enum);
@@ -898,6 +902,7 @@ cdbus_process_opts_get(session_t *ps, DBusMessage *msg) {
   cdbus_m_opts_get_do(detect_rounded_corners, cdbus_reply_bool);
   cdbus_m_opts_get_do(paint_on_overlay, cdbus_reply_bool);
   cdbus_m_opts_get_do(unredir_if_possible, cdbus_reply_bool);
+  cdbus_m_opts_get_do(unredir_if_possible_delay, cdbus_reply_int32);
   cdbus_m_opts_get_do(redirected_force, cdbus_reply_enum);
   cdbus_m_opts_get_do(stoppaint_force, cdbus_reply_enum);
   cdbus_m_opts_get_do(logpath, cdbus_reply_string);
@@ -926,6 +931,7 @@ cdbus_process_opts_get(session_t *ps, DBusMessage *msg) {
   cdbus_m_opts_get_do(shadow_offset_y, cdbus_reply_int32);
   cdbus_m_opts_get_do(shadow_opacity, cdbus_reply_double);
   cdbus_m_opts_get_do(clear_shadow, cdbus_reply_bool);
+  cdbus_m_opts_get_do(xinerama_shadow_crop, cdbus_reply_bool);
 
   cdbus_m_opts_get_do(fade_delta, cdbus_reply_int32);
   cdbus_m_opts_get_do(fade_in_step, cdbus_reply_int32);

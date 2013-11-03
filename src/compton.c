@@ -776,19 +776,18 @@ recheck_focus(session_t *ps) {
   // opacity on it
   Window wid = 0;
   int revert_to;
-  win *w = NULL;
 
   XGetInputFocus(ps->dpy, &wid, &revert_to);
 
-  if (!wid || PointerRoot == wid)
-    return NULL;
+  win *w = find_win_all(ps, wid);
 
-  // Fallback to the old method if find_toplevel() fails
-  if (!(w = find_toplevel(ps, wid))) {
-    w = find_toplevel2(ps, wid);
-  }
+#ifdef DEBUG_EVENTS
+  print_timestamp(ps);
+  printf_dbgf("(): %#010lx (%#010lx \"%s\") focused.\n", wid,
+      (w ? w->id: None), (w ? w->name: NULL));
+#endif
 
-  // And we set the focus state and opacity here
+  // And we set the focus state here
   if (w) {
     win_set_focused(ps, w, true);
     return w;
@@ -1075,13 +1074,7 @@ get_alpha_pict_o(session_t *ps, opacity_t o) {
 
 static win *
 paint_preprocess(session_t *ps, win *list) {
-  // Initialize unredir_possible
-  bool unredir_possible = false;
-
-  win *w;
   win *t = NULL, *next = NULL;
-  // Trace whether it's the highest window to paint
-  bool is_highest = true;
 
   // Fading step calculation
   time_ms_t steps = 0L;
@@ -1097,7 +1090,10 @@ paint_preprocess(session_t *ps, win *list) {
 
   XserverRegion last_reg_ignore = None;
 
-  for (w = list; w; w = next) {
+  bool unredir_possible = false;
+  // Trace whether it's the highest window to paint
+  bool is_highest = true;
+  for (win *w = list; w; w = next) {
     bool to_paint = true;
     const winmode_t mode_old = w->mode;
 
@@ -1105,9 +1101,16 @@ paint_preprocess(session_t *ps, win *list) {
     next = w->next;
     opacity_t opacity_old = w->opacity;
 
-    // Destroy reg_ignore on all windows if they should expire
-    if (ps->reg_ignore_expire)
-      free_region(ps, &w->reg_ignore);
+    // Data expiration
+    {
+      // Remove built shadow if needed
+      if (w->flags & WFLAG_SIZE_CHANGE)
+        free_paint(ps, &w->shadow_paint);
+
+      // Destroy reg_ignore on all windows if they should expire
+      if (ps->reg_ignore_expire)
+        free_region(ps, &w->reg_ignore);
+    }
 
     // Update window opacity target and dim state if asked
     if (WFLAG_OPCT_CHANGE & w->flags) {
@@ -1118,43 +1121,33 @@ paint_preprocess(session_t *ps, win *list) {
     // Run fading
     run_fade(ps, w, steps);
 
+    // Opacity will not change, from now on.
+
     // Give up if it's not damaged or invisible, or it's unmapped and its
-    // pixmap is gone (for example due to a ConfigureNotify)
+    // pixmap is gone (for example due to a ConfigureNotify), or when it's
+    // excluded
     if (!w->damaged
         || w->a.x + w->a.width < 1 || w->a.y + w->a.height < 1
         || w->a.x >= ps->root_width || w->a.y >= ps->root_height
-        || ((IsUnmapped == w->a.map_state || w->destroyed)
-          && !w->paint.pixmap)) {
+        || ((IsUnmapped == w->a.map_state || w->destroyed) && !w->paint.pixmap)
+        || get_alpha_pict_o(ps, w->opacity) == ps->alpha_picts[0]
+        || w->paint_excluded)
       to_paint = false;
-    }
 
-    to_paint = to_paint && !w->paint_excluded;
+    // to_paint will never change afterward
 
-    if (to_paint) {
-      // If opacity changes
-      if (w->opacity != opacity_old) {
-        win_determine_mode(ps, w);
-        add_damage_win(ps, w);
-      }
-
-      if (get_alpha_pict_o(ps, w->opacity) == ps->alpha_picts[0])
-        to_paint = false;
-    }
+    // Determine mode as early as possible
+    if (to_paint && (!w->to_paint || w->opacity != opacity_old))
+      win_determine_mode(ps, w);
 
     if (to_paint) {
       // Fetch bounding region
-      if (!w->border_size) {
+      if (!w->border_size)
         w->border_size = border_size(ps, w, true);
-      }
 
       // Fetch window extents
-      if (!w->extents) {
+      if (!w->extents)
         w->extents = win_extents(ps, w);
-        // If w->extents does not exist, the previous add_damage_win()
-        // call when opacity changes has no effect, so redo it here.
-        if (w->opacity != opacity_old)
-          add_damage_win(ps, w);
-      }
 
       // Calculate frame_opacity
       {
@@ -1167,6 +1160,8 @@ paint_preprocess(session_t *ps, win *list) {
         else
           w->frame_opacity = 0.0;
 
+        // Destroy all reg_ignore above when frame opaque state changes on
+        // SOLID mode
         if (w->to_paint && WMODE_SOLID == mode_old
             && (0.0 == frame_opacity_old) != (0.0 == w->frame_opacity))
           ps->reg_ignore_expire = true;
@@ -1177,23 +1172,17 @@ paint_preprocess(session_t *ps, win *list) {
         w->shadow_opacity = ps->o.shadow_opacity * w->frame_opacity;
       else
         w->shadow_opacity = ps->o.shadow_opacity * get_opacity_percent(w);
-
-      // Rebuild shadow if necessary
-      if (w->flags & WFLAG_SIZE_CHANGE) {
-        free_paint(ps, &w->shadow_paint);
-      }
-
-      if (w->shadow && !paint_isvalid(ps, &w->shadow_paint))
-        win_build_shadow(ps, w, 1);
     }
 
+    // Add window to damaged area if its painting status changes
+    // or opacity changes
+    if (to_paint != w->to_paint || w->opacity != opacity_old)
+      add_damage_win(ps, w);
+
+    // Destroy all reg_ignore above when window mode changes
     if ((to_paint && WMODE_SOLID == w->mode)
         != (w->to_paint && WMODE_SOLID == mode_old))
       ps->reg_ignore_expire = true;
-
-    // Add window to damaged area if its painting status changes
-    if (to_paint != w->to_paint)
-      add_damage_win(ps, w);
 
     if (to_paint) {
       // Generate ignore region for painting to reduce GPU load
@@ -1229,19 +1218,23 @@ paint_preprocess(session_t *ps, win *list) {
 
       last_reg_ignore = w->reg_ignore;
 
+      // (Un)redirect screen
+      // We could definitely unredirect the screen when there's no window to
+      // paint, but this is typically unnecessary, may cause flickering when
+      // fading is enabled, and could create inconsistency when the wallpaper
+      // is not correctly set.
       if (ps->o.unredir_if_possible && is_highest && to_paint) {
         is_highest = false;
-        // Disable unredirection for multi-screen setups
         if (WMODE_SOLID == w->mode
             && (!w->frame_opacity || !win_has_frame(w))
-            && win_is_fullscreen(ps, w))
+            && win_is_fullscreen(ps, w)
+            && !w->unredir_if_possible_excluded)
           unredir_possible = true;
       }
 
       // Reset flags
       w->flags = 0;
     }
-
 
     // Avoid setting w->to_paint if w is to be freed
     bool destroyed = (w->opacity_tgt == w->opacity && w->destroyed);
@@ -1258,14 +1251,29 @@ paint_preprocess(session_t *ps, win *list) {
       w->to_paint = to_paint;
   }
 
+
   // If possible, unredirect all windows and stop painting
   if (UNSET != ps->o.redirected_force)
     unredir_possible = !ps->o.redirected_force;
 
-  if (unredir_possible)
-    redir_stop(ps);
-  else
+  // If there's no window to paint, and the screen isn't redirected,
+  // don't redirect it.
+  if (ps->o.unredir_if_possible && is_highest && !ps->redirected)
+    unredir_possible = true;
+  if (unredir_possible) {
+    if (ps->redirected) {
+      if (!ps->o.unredir_if_possible_delay || ps->tmout_unredir_hit)
+        redir_stop(ps);
+      else if (!ps->tmout_unredir->enabled) {
+        timeout_reset(ps, ps->tmout_unredir);
+        ps->tmout_unredir->enabled = true;
+      }
+    }
+  }
+  else {
+    ps->tmout_unredir->enabled = false;
     redir_start(ps);
+  }
 
   return t;
 }
@@ -1691,7 +1699,6 @@ paint_all(session_t *ps, XserverRegion region, XserverRegion region_real, win *t
 #ifdef DEBUG_REPAINT
   static struct timespec last_paint = { 0 };
 #endif
-  win *w = NULL;
   XserverRegion reg_paint = None, reg_tmp = None, reg_tmp2 = None;
 
 #ifdef CONFIG_VSYNC_OPENGL
@@ -1771,9 +1778,13 @@ paint_all(session_t *ps, XserverRegion region, XserverRegion region_real, win *t
     reg_tmp = XFixesCreateRegion(ps->dpy, NULL, 0);
   reg_tmp2 = XFixesCreateRegion(ps->dpy, NULL, 0);
 
-  for (w = t; w; w = w->prev_trans) {
+  for (win *w = t; w; w = w->prev_trans) {
     // Painting shadow
     if (w->shadow) {
+      // Lazy shadow building
+      if (!paint_isvalid(ps, &w->shadow_paint))
+        win_build_shadow(ps, w, 1);
+
       // Shadow is to be painted based on the ignore region of current
       // window
       if (w->reg_ignore) {
@@ -1816,6 +1827,12 @@ paint_all(session_t *ps, XserverRegion region, XserverRegion region_real, win *t
       // power and handling shaped windows
       if (ps->o.clear_shadow && w->border_size)
         XFixesSubtractRegion(ps->dpy, reg_paint, reg_paint, w->border_size);
+
+#ifdef CONFIG_XINERAMA
+      if (ps->o.xinerama_shadow_crop && w->xinerama_scr >= 0)
+        XFixesIntersectRegion(ps->dpy, reg_paint, reg_paint,
+            ps->xinerama_scr_regs[w->xinerama_scr]);
+#endif
 
       // Detect if the region is empty before painting
       {
@@ -1947,7 +1964,7 @@ paint_all(session_t *ps, XserverRegion region, XserverRegion region_real, win *t
   printf("[ %5ld:%09ld ] ", diff.tv_sec, diff.tv_nsec);
   last_paint = now;
   printf("paint:");
-  for (w = t; w; w = w->prev_trans)
+  for (win *w = t; w; w = w->prev_trans)
     printf(" %#010lx", w->id);
   putchar('\n');
   fflush(stdout);
@@ -1956,7 +1973,7 @@ paint_all(session_t *ps, XserverRegion region, XserverRegion region_real, win *t
   // Check if fading is finished on all painted windows
   {
     win *pprev = NULL;
-    for (w = t; w; w = pprev) {
+    for (win *w = t; w; w = pprev) {
       pprev = w->prev_trans;
       check_fade_fin(ps, w);
     }
@@ -1965,6 +1982,11 @@ paint_all(session_t *ps, XserverRegion region, XserverRegion region_real, win *t
 
 static void
 add_damage(session_t *ps, XserverRegion damage) {
+  // Ignore damage when screen isn't redirected
+  if (!ps->redirected)
+    free_region(ps, &damage);
+
+  if (!damage) return;
   if (ps->all_damage) {
     XFixesUnionRegion(ps->dpy, ps->all_damage, ps->all_damage, damage);
     XFixesDestroyRegion(ps->dpy, damage);
@@ -1993,13 +2015,18 @@ repair_win(session_t *ps, win *w) {
       w->a.y + w->a.border_width);
   }
 
+  w->damaged = true;
+  w->pixmap_damaged = true;
+
+  // Why care about damage when screen is unredirected?
+  // We will force full-screen repaint on redirection.
+  if (!ps->redirected) return;
+
   // Remove the part in the damage area that could be ignored
   if (!ps->reg_ignore_expire && w->prev_trans && w->prev_trans->reg_ignore)
     XFixesSubtractRegion(ps->dpy, parts, parts, w->prev_trans->reg_ignore);
 
   add_damage(ps, parts);
-  w->damaged = true;
-  w->pixmap_damaged = true;
 }
 
 static wintype_t
@@ -2023,6 +2050,13 @@ wid_get_prop_wintype(session_t *ps, Window wid) {
 
 static void
 map_win(session_t *ps, Window id) {
+  // Unmap overlay window if it got mapped but we are currently not
+  // in redirected state.
+  if (ps->overlay && id == ps->overlay && !ps->redirected) {
+    XUnmapWindow(ps->dpy, ps->overlay);
+    XFlush(ps->dpy);
+  }
+
   win *w = find_win(ps, id);
 
   // Don't care about window mapping if it's an InputOnly window
@@ -2031,16 +2065,11 @@ map_win(session_t *ps, Window id) {
       || IsViewable == w->a.map_state)
     return;
 
-  assert(!w->focused_real);
+  assert(!win_is_focused_real(ps, w));
 
   w->a.map_state = IsViewable;
 
-  // Set focused to false
-  bool focused_real = false;
-  if (ps->o.track_focus && ps->o.use_ewmh_active_win
-      && w == ps->active_win)
-    focused_real = true;
-  win_set_focused(ps, w, focused_real);
+  cxinerama_win_upd_scr(ps, w);
 
   // Call XSelectInput() before reading properties so that no property
   // changes are lost
@@ -2076,14 +2105,10 @@ map_win(session_t *ps, Window id) {
   // Detect if the window is shaped or has rounded corners
   win_update_shape_raw(ps, w);
 
-  // Occasionally compton does not seem able to get a FocusIn event from
-  // a window just mapped. I suspect it's a timing issue again when the
-  // XSelectInput() is called too late. We have to recheck the focused
-  // window here. It makes no sense if we are using EWMH
-  // _NET_ACTIVE_WINDOW.
-  if (ps->o.track_focus && !ps->o.use_ewmh_active_win) {
+  // FocusIn/Out may be ignored when the window is unmapped, so we must
+  // recheck focus here
+  if (ps->o.track_focus)
     recheck_focus(ps);
-  }
 
   // Update window focus state
   win_update_focused(ps, w);
@@ -2259,7 +2284,7 @@ calc_opacity(session_t *ps, win *w) {
     }
 
     // Respect active_opacity only when the window is physically focused
-    if (OPAQUE == opacity && ps->o.active_opacity && w->focused_real)
+    if (OPAQUE == opacity && ps->o.active_opacity && win_is_focused_real(ps, w))
       opacity = ps->o.active_opacity;
   }
 
@@ -2450,7 +2475,7 @@ static void
 win_update_opacity_rule(session_t *ps, win *w) {
   // If long is 32-bit, unfortunately there's no way could we express "unset",
   // so we just entirely don't distinguish "unset" and OPAQUE
-  long opacity = OPAQUE;
+  opacity_t opacity = OPAQUE;
   void *val = NULL;
   if (c2_matchd(ps, w, ps->o.opacity_rules, &w->cache_oparule, &val))
     opacity = ((double) (long) val) / 100.0 * OPAQUE;
@@ -2499,6 +2524,9 @@ win_on_factor_change(session_t *ps, win *w) {
   if (ps->o.paint_blacklist)
     w->paint_excluded = win_match(ps, w, ps->o.paint_blacklist,
         &w->cache_pblst);
+  if (ps->o.unredir_if_possible_blacklist)
+    w->unredir_if_possible_excluded = win_match(ps, w,
+        ps->o.unredir_if_possible_blacklist, &w->cache_uipblst);
 }
 
 /**
@@ -2547,6 +2575,31 @@ calc_shadow_geometry(session_t *ps, win *w) {
 }
 
 /**
+ * Update window type.
+ */
+static void
+win_upd_wintype(session_t *ps, win *w) {
+  const wintype_t wtype_old = w->window_type;
+
+  // Detect window type here
+  w->window_type = wid_get_prop_wintype(ps, w->client_win);
+
+  // Conform to EWMH standard, if _NET_WM_WINDOW_TYPE is not present, take
+  // override-redirect windows or windows without WM_TRANSIENT_FOR as
+  // _NET_WM_WINDOW_TYPE_NORMAL, otherwise as _NET_WM_WINDOW_TYPE_DIALOG.
+  if (WINTYPE_UNKNOWN == w->window_type) {
+    if (w->a.override_redirect
+        || !wid_has_prop(ps, w->client_win, ps->atom_transient))
+      w->window_type = WINTYPE_NORMAL;
+    else
+      w->window_type = WINTYPE_DIALOG;
+  }
+
+  if (w->window_type != wtype_old)
+    win_on_wtype_change(ps, w);
+}
+
+/**
  * Mark a window as the client window of another.
  *
  * @param ps current session
@@ -2568,32 +2621,11 @@ win_mark_client(session_t *ps, win *w, Window client) {
   // Make sure the XSelectInput() requests are sent
   XSync(ps->dpy, False);
 
-  // Get frame widths if needed
-  if (ps->o.frame_opacity) {
+  win_upd_wintype(ps, w);
+
+  // Get frame widths. The window is in damaged area already.
+  if (ps->o.frame_opacity)
     get_frame_extents(ps, w, client);
-  }
-
-  {
-    wintype_t wtype_old = w->window_type;
-
-    // Detect window type here
-    if (WINTYPE_UNKNOWN == w->window_type)
-      w->window_type = wid_get_prop_wintype(ps, w->client_win);
-
-    // Conform to EWMH standard, if _NET_WM_WINDOW_TYPE is not present, take
-    // override-redirect windows or windows without WM_TRANSIENT_FOR as
-    // _NET_WM_WINDOW_TYPE_NORMAL, otherwise as _NET_WM_WINDOW_TYPE_DIALOG.
-    if (WINTYPE_UNKNOWN == w->window_type) {
-      if (w->a.override_redirect
-          || !wid_has_prop(ps, client, ps->atom_transient))
-        w->window_type = WINTYPE_NORMAL;
-      else
-        w->window_type = WINTYPE_DIALOG;
-    }
-
-    if (w->window_type != wtype_old)
-      win_on_wtype_change(ps, w);
-  }
 
   // Get window group
   if (ps->o.track_leader)
@@ -2677,6 +2709,9 @@ add_win(session_t *ps, Window id, Window prev) {
 
     .id = None,
     .a = { },
+#ifdef CONFIG_XINERAMA
+    .xinerama_scr = -1,
+#endif
     .pictfmt = NULL,
     .mode = WMODE_TRANS,
     .damaged = false,
@@ -2705,7 +2740,6 @@ add_win(session_t *ps, Window id, Window prev) {
 
     .focused = false,
     .focused_force = UNSET,
-    .focused_real = false,
 
     .name = NULL,
     .class_instance = NULL,
@@ -2796,14 +2830,13 @@ add_win(session_t *ps, Window id, Window prev) {
   assert(IsViewable == map_state || IsUnmapped == map_state);
   new->a.map_state = IsUnmapped;
 
-  // Get window picture format
-  if (InputOutput == new->a.class)
+  if (InputOutput == new->a.class) {
+       // Get window picture format
     new->pictfmt = XRenderFindVisualFormat(ps->dpy, new->a.visual);
 
-  // Create Damage for window
-  if (InputOutput == new->a.class) {
-    set_ignore_next(ps);
-    new->damage = XDamageCreate(ps->dpy, id, XDamageReportNonEmpty);
+       // Create Damage for window
+       set_ignore_next(ps);
+       new->damage = XDamageCreate(ps->dpy, id, XDamageReportNonEmpty);
   }
 
   calc_win_size(ps, new);
@@ -2989,8 +3022,10 @@ configure_win(session_t *ps, XConfigureEvent *ce) {
       add_damage(ps, damage);
     }
 
-    if (factor_change)
+    if (factor_change) {
+      cxinerama_win_upd_scr(ps, w);
       win_on_factor_change(ps, w);
+    }
   }
 
   // override_redirect flag cannot be changed after window creation, as far
@@ -3222,7 +3257,7 @@ win_update_focused(session_t *ps, win *w) {
     w->focused = w->focused_force;
   }
   else {
-    w->focused = w->focused_real;
+    w->focused = win_is_focused_real(ps, w);
 
     // Use wintype_focus, and treat WM windows and override-redirected
     // windows specially
@@ -3254,51 +3289,68 @@ win_set_focused(session_t *ps, win *w, bool focused) {
   if (IsUnmapped == w->a.map_state)
     return;
 
-  if (w->focused_real != focused) {
-    w->focused_real = focused;
+  if (win_is_focused_real(ps, w) == focused) return;
 
-    // If window grouping detection is enabled
-    if (ps->o.track_leader) {
-      Window leader = win_get_leader(ps, w);
+  if (focused) {
+    if (ps->active_win)
+      win_set_focused(ps, ps->active_win, false);
+    ps->active_win = w;
+  }
+  else if (w == ps->active_win)
+    ps->active_win = NULL;
 
-      // If the window gets focused, replace the old active_leader
-      if (w->focused_real && leader != ps->active_leader) {
-        Window active_leader_old = ps->active_leader;
+  assert(win_is_focused_real(ps, w) == focused);
 
-        ps->active_leader = leader;
+  win_on_focus_change(ps, w);
+}
 
-        group_update_focused(ps, active_leader_old);
-        group_update_focused(ps, leader);
-      }
-      // If the group get unfocused, remove it from active_leader
-      else if (!w->focused_real && leader && leader == ps->active_leader
-          && !group_is_focused(ps, leader)) {
-        ps->active_leader = None;
-        group_update_focused(ps, leader);
-      }
+/**
+ * Handle window focus change.
+ */
+static void
+win_on_focus_change(session_t *ps, win *w) {
+  // If window grouping detection is enabled
+  if (ps->o.track_leader) {
+    Window leader = win_get_leader(ps, w);
 
-      // The window itself must be updated anyway
-      win_update_focused(ps, w);
+    // If the window gets focused, replace the old active_leader
+    if (win_is_focused_real(ps, w) && leader != ps->active_leader) {
+      Window active_leader_old = ps->active_leader;
+
+      ps->active_leader = leader;
+
+      group_update_focused(ps, active_leader_old);
+      group_update_focused(ps, leader);
     }
-    // Otherwise, only update the window itself
-    else {
-      win_update_focused(ps, w);
+    // If the group get unfocused, remove it from active_leader
+    else if (!win_is_focused_real(ps, w) && leader && leader == ps->active_leader
+        && !group_is_focused(ps, leader)) {
+      ps->active_leader = None;
+      group_update_focused(ps, leader);
     }
 
-    // Update everything related to conditions
-    win_on_factor_change(ps, w);
+    // The window itself must be updated anyway
+    win_update_focused(ps, w);
+  }
+  // Otherwise, only update the window itself
+  else {
+    win_update_focused(ps, w);
+  }
+
+  // Update everything related to conditions
+  win_on_factor_change(ps, w);
 
 #ifdef CONFIG_DBUS
-    // Send D-Bus signal
-    if (ps->o.dbus) {
-      if (w->focused_real)
-        cdbus_ev_win_focusin(ps, w);
-      else
-        cdbus_ev_win_focusout(ps, w);
-    }
-#endif
+  // Send D-Bus signal
+  if (ps->o.dbus) {
+    if (win_is_focused_real(ps, w))
+      cdbus_ev_win_focusin(ps, w);
+    else
+      cdbus_ev_win_focusout(ps, w);
   }
+#endif
 }
+
 /**
  * Update leader of a window.
  */
@@ -3338,7 +3390,7 @@ win_set_leader(session_t *ps, win *w, Window nleader) {
     // Update the old and new window group and active_leader if the window
     // could affect their state.
     Window cache_leader = win_get_leader(ps, w);
-    if (w->focused_real && cache_leader_old != cache_leader) {
+    if (win_is_focused_real(ps, w) && cache_leader_old != cache_leader) {
       ps->active_leader = cache_leader;
 
       group_update_focused(ps, cache_leader_old);
@@ -3664,9 +3716,8 @@ ev_name(session_t *ps, XEvent *ev) {
     CASESTRRET(PropertyNotify);
     CASESTRRET(ClientMessage);
     default:
-      if (ev->type == ps->damage_event + XDamageNotify) {
+      if (isdamagenotify(ps, ev))
         return "Damage";
-      }
 
       if (ps->shape_exists && ev->type == ps->shape_event) {
         return "ShapeNotify";
@@ -3705,7 +3756,7 @@ ev_window(session_t *ps, XEvent *ev) {
     case ClientMessage:
       return ev->xclient.window;
     default:
-      if (ev->type == ps->damage_event + XDamageNotify) {
+      if (isdamagenotify(ps, ev)) {
         return ((XDamageNotifyEvent *)ev)->drawable;
       }
 
@@ -3761,25 +3812,16 @@ ev_focus_report(XFocusChangeEvent* ev) {
  */
 inline static bool
 ev_focus_accept(XFocusChangeEvent *ev) {
-  return ev->detail == NotifyNonlinear
-    || ev->detail == NotifyNonlinearVirtual;
+  return NotifyNormal == ev->mode || NotifyUngrab == ev->mode;
 }
 
-inline static void
+static inline void
 ev_focus_in(session_t *ps, XFocusChangeEvent *ev) {
 #ifdef DEBUG_EVENTS
   ev_focus_report(ev);
 #endif
 
-  if (!ev_focus_accept(ev))
-    return;
-
-  win *w = find_win(ps, ev->window);
-
-  // To deal with events sent from windows just destroyed
-  if (!w) return;
-
-  win_set_focused(ps, w, true);
+  recheck_focus(ps);
 }
 
 inline static void
@@ -3788,15 +3830,7 @@ ev_focus_out(session_t *ps, XFocusChangeEvent *ev) {
   ev_focus_report(ev);
 #endif
 
-  if (!ev_focus_accept(ev))
-    return;
-
-  win *w = find_win(ps, ev->window);
-
-  // To deal with events sent from windows just destroyed
-  if (!w) return;
-
-  win_set_focused(ps, w, false);
+  recheck_focus(ps);
 }
 
 inline static void
@@ -3918,21 +3952,11 @@ ev_expose(session_t *ps, XExposeEvent *ev) {
 static void
 update_ewmh_active_win(session_t *ps) {
   // Search for the window
-  Window wid =
-    wid_get_prop_window(ps, ps->root, ps->atom_ewmh_active_win);
-  win *w = NULL;
+  Window wid = wid_get_prop_window(ps, ps->root, ps->atom_ewmh_active_win);
+  win *w = find_win_all(ps, wid);
 
-  if (wid && !(w = find_toplevel(ps, wid)))
-    if (!(w = find_win(ps, wid)))
-      w = find_toplevel2(ps, wid);
-
-  // Mark the window focused
-  if (w) {
-    if (ps->active_win && w != ps->active_win)
-      win_set_focused(ps, ps->active_win, false);
-    ps->active_win = w;
-    win_set_focused(ps, w, true);
-  }
+  // Mark the window focused. No need to unfocus the previous one.
+  if (w) win_set_focused(ps, w, true);
 }
 
 inline static void
@@ -3982,6 +4006,14 @@ ev_property_notify(session_t *ps, XPropertyEvent *ev) {
         win_mark_client(ps, w_top, ev->window);
       }
     }
+  }
+
+  // If _NET_WM_WINDOW_TYPE changes... God knows why this would happen, but
+  // there are always some stupid applications. (#144)
+  if (ev->atom == ps->atom_win_type) {
+    win *w = NULL;
+    if ((w = find_toplevel(ps, ev->window)))
+      win_upd_wintype(ps, w);
   }
 
   // If _NET_WM_OPACITY changes
@@ -4101,12 +4133,15 @@ ev_shape_notify(session_t *ps, XShapeEvent *ev) {
 static void
 ev_screen_change_notify(session_t *ps,
     XRRScreenChangeNotifyEvent __attribute__((unused)) *ev) {
-  if (!ps->o.refresh_rate) {
+  if (ps->o.xinerama_shadow_crop)
+    cxinerama_upd_scrs(ps);
+
+  if (ps->o.sw_opti && !ps->o.refresh_rate) {
     update_refresh_rate(ps);
     if (!ps->refresh_rate) {
       fprintf(stderr, "ev_screen_change_notify(): Refresh rate detection "
-          "failed, software VSync disabled.");
-      ps->o.vsync = VSYNC_NONE;
+          "failed, --sw-opti disabled.");
+      ps->o.sw_opti = false;
     }
   }
 }
@@ -4150,7 +4185,7 @@ ev_handle(session_t *ps, XEvent *ev) {
   }
 
 #ifdef DEBUG_EVENTS
-  if (ev->type != ps->damage_event + XDamageNotify) {
+  if (!isdamagenotify(ps, ev)) {
     Window wid = ev_window(ps, ev);
     char *window_name = NULL;
     bool to_free = false;
@@ -4212,10 +4247,10 @@ ev_handle(session_t *ps, XEvent *ev) {
         ev_screen_change_notify(ps, (XRRScreenChangeNotifyEvent *) ev);
         break;
       }
-      if (ev->type == ps->damage_event + XDamageNotify) {
-        ev_damage_notify(ps, (XDamageNotifyEvent *)ev);
+      if (isdamagenotify(ps, ev)) {
+        ev_damage_notify(ps, (XDamageNotifyEvent *) ev);
+        break;
       }
-      break;
   }
 }
 
@@ -4360,6 +4395,12 @@ usage(int ret) {
     "--unredir-if-possible\n"
     "  Unredirect all windows if a full-screen opaque window is\n"
     "  detected, to maximize performance for full-screen windows.\n"
+    "--unredir-if-possible-delay ms\n"
+    "  Delay before unredirecting the window, in milliseconds.\n"
+    "  Defaults to 0.\n"
+    "--unredir-if-possible-exclude condition\n"
+    "  Conditions of windows that shouldn't be considered full-screen\n"
+    "  for unredirecting screen.\n"
     "--focus-exclude condition\n"
     "  Specify a list of conditions of windows that should always be\n"
     "  considered focused.\n"
@@ -4417,6 +4458,15 @@ usage(int ret) {
     "  should not be painted in, such as a dock window region.\n"
     "  Use --shadow-exclude-reg \'x10+0-0\', for example, if the 10 pixels\n"
     "  on the bottom of the screen should not have shadows painted on.\n"
+#undef WARNING
+#ifndef CONFIG_XINERAMA
+#define WARNING WARNING_DISABLED
+#else
+#define WARNING
+#endif
+    "--xinerama-shadow-crop\n"
+    "  Crop shadow of a window fully on a particular Xinerama screen to the\n"
+    "  screen." WARNING "\n"
     "--backend backend\n"
     "  Choose backend. Possible choices are xrender and glx" WARNING ".\n"
     "--glx-no-stencil\n"
@@ -4575,6 +4625,27 @@ fork_after(session_t *ps) {
   success = ostream_reopen(ps, NULL);
 
   return success;
+}
+
+/**
+ * Parse a long number.
+ */
+static inline bool
+parse_long(const char *s, long *dest) {
+  const char *endptr = NULL;
+  long val = strtol(s, (char **) &endptr, 0);
+  if (!endptr || endptr == s) {
+    printf_errf("(\"%s\"): Invalid number.", s);
+    return false;
+  }
+  while (isspace(*endptr))
+    ++endptr;
+  if (*endptr) {
+    printf_errf("(\"%s\"): Trailing characters.", s);
+    return false;
+  }
+  *dest = val;
+  return true;
 }
 
 /**
@@ -4954,13 +5025,32 @@ parse_cfg_condlst(session_t *ps, const config_t *pcfg, c2_lptr_t **pcondlst,
     // Parse an array of options
     if (config_setting_is_array(setting)) {
       int i = config_setting_length(setting);
-      while (i--) {
+      while (i--)
         condlst_add(ps, pcondlst, config_setting_get_string_elem(setting, i));
-      }
     }
     // Treat it as a single pattern if it's a string
     else if (CONFIG_TYPE_STRING == config_setting_type(setting)) {
       condlst_add(ps, pcondlst, config_setting_get_string(setting));
+    }
+  }
+}
+
+/**
+ * Parse an opacity rule list in configuration file.
+ */
+static inline void
+parse_cfg_condlst_opct(session_t *ps, const config_t *pcfg, const char *name) {
+  config_setting_t *setting = config_lookup(pcfg, name);
+  if (setting) {
+    // Parse an array of options
+    if (config_setting_is_array(setting)) {
+      int i = config_setting_length(setting);
+      while (i--)
+        parse_rule_opacity(ps, config_setting_get_string_elem(setting, i));
+    }
+    // Treat it as a single pattern if it's a string
+    else if (CONFIG_TYPE_STRING == config_setting_type(setting)) {
+      parse_rule_opacity(ps, config_setting_get_string(setting));
     }
   }
 }
@@ -5089,6 +5179,9 @@ parse_config(session_t *ps, struct options_tmp *pcfgtmp) {
   // --detect-rounded-corners
   lcfg_lookup_bool(&cfg, "detect-rounded-corners",
       &ps->o.detect_rounded_corners);
+  // --xinerama-shadow-crop
+  lcfg_lookup_bool(&cfg, "xinerama-shadow-crop",
+      &ps->o.xinerama_shadow_crop);
   // --detect-client-opacity
   lcfg_lookup_bool(&cfg, "detect-client-opacity",
       &ps->o.detect_client_opacity);
@@ -5114,6 +5207,9 @@ parse_config(session_t *ps, struct options_tmp *pcfgtmp) {
   // --unredir-if-possible
   lcfg_lookup_bool(&cfg, "unredir-if-possible",
       &ps->o.unredir_if_possible);
+  // --unredir-if-possible-delay
+  if (lcfg_lookup_int(&cfg, "unredir-if-possible-delay", &ival))
+    ps->o.unredir_if_possible_delay = ival;
   // --inactive-dim-fixed
   lcfg_lookup_bool(&cfg, "inactive-dim-fixed", &ps->o.inactive_dim_fixed);
   // --detect-transient
@@ -5132,7 +5228,9 @@ parse_config(session_t *ps, struct options_tmp *pcfgtmp) {
   // --blur-background-exclude
   parse_cfg_condlst(ps, &cfg, &ps->o.blur_background_blacklist, "blur-background-exclude");
   // --opacity-rule
-  parse_cfg_condlst(ps, &cfg, &ps->o.opacity_rules, "opacity-rule");
+  parse_cfg_condlst_opct(ps, &cfg, "opacity-rule");
+  // --unredir-if-possible-exclude
+  parse_cfg_condlst(ps, &cfg, &ps->o.unredir_if_possible_blacklist, "unredir-if-possible-exclude");
   // --blur-background
   lcfg_lookup_bool(&cfg, "blur-background", &ps->o.blur_background);
   // --blur-background-frame
@@ -5195,6 +5293,20 @@ get_cfg(session_t *ps, int argc, char *const *argv, bool first_pass) {
   const static struct option longopts[] = {
     { "help", no_argument, NULL, 'h' },
     { "config", required_argument, NULL, 256 },
+    { "shadow-radius", required_argument, NULL, 'r' },
+    { "shadow-opacity", required_argument, NULL, 'o' },
+    { "shadow-offset-x", required_argument, NULL, 'l' },
+    { "shadow-offset-y", required_argument, NULL, 't' },
+    { "fade-in-step", required_argument, NULL, 'I' },
+    { "fade-out-step", required_argument, NULL, 'O' },
+    { "menu-opacity", required_argument, NULL, 'm' },
+    { "shadow", no_argument, NULL, 'c' },
+    { "no-dock-shadow", no_argument, NULL, 'C' },
+    { "clear-shadow", no_argument, NULL, 'z' },
+    { "fading", no_argument, NULL, 'f' },
+    { "inactive-opacity", required_argument, NULL, 'i' },
+    { "frame-opacity", required_argument, NULL, 'e' },
+    { "no-dnd-shadow", no_argument, NULL, 'G' },
     { "shadow-red", required_argument, NULL, 257 },
     { "shadow-green", required_argument, NULL, 258 },
     { "shadow-blue", required_argument, NULL, 259 },
@@ -5245,6 +5357,9 @@ get_cfg(session_t *ps, int argc, char *const *argv, bool first_pass) {
     { "opacity-rule", required_argument, NULL, 304 },
     { "shadow-exclude-reg", required_argument, NULL, 305 },
     { "paint-exclude", required_argument, NULL, 306 },
+    { "xinerama-shadow-crop", no_argument, NULL, 307 },
+    { "unredir-if-possible-exclude", required_argument, NULL, 308 },
+    { "unredir-if-possible-delay", required_argument, NULL, 309 },
     // Must terminate with a NULL entry
     { NULL, 0, NULL, 0 },
   };
@@ -5288,30 +5403,35 @@ get_cfg(session_t *ps, int argc, char *const *argv, bool first_pass) {
     ps->o.wintype_opacity[i] = 1.0;
   }
 
+  // Enforce LC_NUMERIC locale "C" here to make sure dots are recognized
+  // instead of commas in atof().
+  setlocale(LC_NUMERIC, "C");
+
 #ifdef CONFIG_LIBCONFIG
   parse_config(ps, &cfgtmp);
 #endif
 
   // Parse commandline arguments. Range checking will be done later.
 
-  // Enforce LC_NUMERIC locale "C" here to make sure dots are recognized
-  // instead of commas in atof().
-  setlocale(LC_NUMERIC, "C");
-
   optind = 1;
   while (-1 !=
       (o = getopt_long(argc, argv, shortopts, longopts, &longopt_idx))) {
+    long val = 0;
     switch (o) {
 #define P_CASEBOOL(idx, option) case idx: ps->o.option = true; break
+#define P_CASELONG(idx, option) \
+      case idx: \
+        if (!parse_long(optarg, &val)) exit(1); \
+        ps->o.option = val; \
+        break
+
       // Short options
       case 'h':
         usage(0);
         break;
       case 'd':
         break;
-      case 'D':
-        ps->o.fade_delta = atoi(optarg);
-        break;
+      P_CASELONG('D', fade_delta);
       case 'I':
         ps->o.fade_in_step = normalize_d(atof(optarg)) * OPAQUE;
         break;
@@ -5335,18 +5455,12 @@ get_cfg(session_t *ps, int argc, char *const *argv, bool first_pass) {
         fading_enable = true;
         break;
       P_CASEBOOL('S', synchronize);
-      case 'r':
-        ps->o.shadow_radius = atoi(optarg);
-        break;
+      P_CASELONG('r', shadow_radius);
       case 'o':
         ps->o.shadow_opacity = atof(optarg);
         break;
-      case 'l':
-        ps->o.shadow_offset_x = atoi(optarg);
-        break;
-      case 't':
-        ps->o.shadow_offset_y = atoi(optarg);
-        break;
+      P_CASELONG('l', shadow_offset_x);
+      P_CASELONG('t', shadow_offset_y);
       case 'i':
         ps->o.inactive_opacity = (normalize_d(atof(optarg)) * OPAQUE);
         break;
@@ -5391,10 +5505,7 @@ get_cfg(session_t *ps, int argc, char *const *argv, bool first_pass) {
       P_CASEBOOL(266, shadow_ignore_shaped);
       P_CASEBOOL(267, detect_rounded_corners);
       P_CASEBOOL(268, detect_client_opacity);
-      case 269:
-        // --refresh-rate
-        ps->o.refresh_rate = atoi(optarg);
-        break;
+      P_CASELONG(269, refresh_rate);
       case 270:
         // --vsync
         if (!parse_vsync(ps, optarg))
@@ -5441,10 +5552,7 @@ get_cfg(session_t *ps, int argc, char *const *argv, bool first_pass) {
         break;
       P_CASEBOOL(291, glx_no_stencil);
       P_CASEBOOL(292, glx_copy_from_front);
-      case 293:
-        // --benchmark
-        ps->o.benchmark = atoi(optarg);
-        break;
+      P_CASELONG(293, benchmark);
       case 294:
         // --benchmark-wid
         ps->o.benchmark_wid = strtol(optarg, NULL, 0);
@@ -5473,10 +5581,7 @@ get_cfg(session_t *ps, int argc, char *const *argv, bool first_pass) {
         if (!parse_conv_kern_lst(ps, optarg, ps->o.blur_kerns, MAX_BLUR_PASS))
           exit(1);
         break;
-      case 302:
-        // --resize-damage
-        ps->o.resize_damage = atoi(optarg);
-        break;
+      P_CASELONG(302, resize_damage);
       P_CASEBOOL(303, glx_use_gpushader4);
       case 304:
         // --opacity-rule
@@ -5492,6 +5597,12 @@ get_cfg(session_t *ps, int argc, char *const *argv, bool first_pass) {
         // --paint-exclude
         condlst_add(ps, &ps->o.paint_blacklist, optarg);
         break;
+      P_CASEBOOL(307, xinerama_shadow_crop);
+      case 308:
+        // --unredir-if-possible-exclude
+        condlst_add(ps, &ps->o.unredir_if_possible_blacklist, optarg);
+        break;
+      P_CASELONG(309, unredir_if_possible_delay);
       default:
         usage(1);
         break;
@@ -5538,10 +5649,6 @@ get_cfg(session_t *ps, int argc, char *const *argv, bool first_pass) {
   // --blur-background-frame implies --blur-background
   if (ps->o.blur_background_frame)
     ps->o.blur_background = true;
-
-  // Free background blur blacklist if background blur is not actually enabled
-  if (!ps->o.blur_background)
-    free_wincondlst(&ps->o.blur_background_blacklist);
 
   // Other variables determined by options
 
@@ -5673,11 +5780,6 @@ swopti_init(session_t *ps) {
   if (!ps->refresh_rate)
     return false;
 
-  // Monitor screen changes only if vsync_sw is enabled and we are using
-  // an auto-detected refresh rate
-  if (ps->randr_exists && !ps->o.refresh_rate)
-    XRRSelectInput(ps->dpy, ps->root, RRScreenChangeNotify);
-
   return true;
 }
 
@@ -5781,7 +5883,7 @@ vsync_opengl_init(session_t *ps) {
     return false;
 
   // Get video sync functions
-  if (!ps->glXWaitVideoSyncSGI)
+  if (!ps->glXGetVideoSyncSGI)
     ps->glXGetVideoSyncSGI = (f_GetVideoSync)
       glXGetProcAddress((const GLubyte *) "glXGetVideoSyncSGI");
   if (!ps->glXWaitVideoSyncSGI)
@@ -6015,6 +6117,11 @@ init_overlay(session_t *ps) {
     // Retrieve DamageNotify on root window if we are painting on an
     // overlay
     // root_damage = XDamageCreate(ps->dpy, root, XDamageReportNonEmpty);
+
+    // Unmap overlay, firstly. But this typically does not work because
+    // the window isn't created yet.
+    // XUnmapWindow(ps->dpy, ps->overlay);
+    // XFlush(ps->dpy);
   }
   else {
     fprintf(stderr, "Cannot get X Composite overlay window. Falling "
@@ -6071,7 +6178,8 @@ static void
 redir_start(session_t *ps) {
   if (!ps->redirected) {
 #ifdef DEBUG_REDIR
-    printf("redir_start(): Screen redirected.\n");
+    print_timestamp(ps);
+    printf_dbgf("(): Screen redirected.\n");
 #endif
 
     // Map overlay window. Done firstly according to this:
@@ -6094,6 +6202,9 @@ redir_start(session_t *ps) {
     XSync(ps->dpy, False);
 
     ps->redirected = true;
+
+    // Repaint the whole screen
+    force_repaint(ps);
   }
 }
 
@@ -6234,13 +6345,22 @@ timeout_invoke(session_t *ps, timeout_t *ptmout) {
 }
 
 /**
+ * Reset a timeout to initial state.
+ */
+void
+timeout_reset(session_t *ps, timeout_t *ptmout) {
+  ptmout->firstrun = ptmout->lastrun = get_time_ms();
+}
+
+/**
  * Unredirect all windows.
  */
 static void
 redir_stop(session_t *ps) {
   if (ps->redirected) {
 #ifdef DEBUG_REDIR
-    printf("redir_stop(): Screen unredirected.\n");
+    print_timestamp(ps);
+    printf_dbgf("(): Screen unredirected.\n");
 #endif
     // Destroy all Pictures as they expire once windows are unredirected
     // If we don't destroy them here, looks like the resources are just
@@ -6261,10 +6381,24 @@ redir_stop(session_t *ps) {
 }
 
 /**
+ * Unredirection timeout callback.
+ */
+static bool
+tmout_unredir_callback(session_t *ps, timeout_t *tmout) {
+  ps->tmout_unredir_hit = true;
+  tmout->enabled = false;
+
+  return true;
+}
+
+/**
  * Main loop.
  */
 static bool
 mainloop(session_t *ps) {
+  // Don't miss timeouts even when we have a LOT of other events!
+  timeout_run(ps);
+
   // Process existing events
   // Sometimes poll() returns 1 but no events are actually read,
   // causing XNextEvent() to block, I have no idea what's wrong, so we
@@ -6338,9 +6472,36 @@ mainloop(session_t *ps) {
   free(ptv);
   ptv = NULL;
 
-  timeout_run(ps);
-
   return true;
+}
+
+static void
+cxinerama_upd_scrs(session_t *ps) {
+#ifdef CONFIG_XINERAMA
+  free_xinerama_info(ps);
+
+  if (!ps->o.xinerama_shadow_crop || !ps->xinerama_exists) return;
+
+  if (!XineramaIsActive(ps->dpy)) return;
+
+  ps->xinerama_scrs = XineramaQueryScreens(ps->dpy, &ps->xinerama_nscrs);
+
+  // Just in case the shit hits the fan...
+  if (!ps->xinerama_nscrs) {
+    cxfree(ps->xinerama_scrs);
+    ps->xinerama_scrs = NULL;
+    return;
+  }
+
+  ps->xinerama_scr_regs = allocchk(malloc(sizeof(XserverRegion *)
+        * ps->xinerama_nscrs));
+  for (int i = 0; i < ps->xinerama_nscrs; ++i) {
+    const XineramaScreenInfo * const s = &ps->xinerama_scrs[i];
+    XRectangle r = { .x = s->x_org, .y = s->y_org,
+      .width = s->width, .height = s->height };
+    ps->xinerama_scr_regs[i] = XFixesCreateRegion(ps->dpy, &r, 1);
+  }
+#endif
 }
 
 /**
@@ -6384,6 +6545,8 @@ session_init(session_t *ps_old, int argc, char **argv) {
       .paint_on_overlay = false,
       .resize_damage = 0,
       .unredir_if_possible = false,
+      .unredir_if_possible_blacklist = NULL,
+      .unredir_if_possible_delay = 0,
       .redirected_force = UNSET,
       .stoppaint_force = UNSET,
       .dbus = false,
@@ -6409,6 +6572,7 @@ session_init(session_t *ps_old, int argc, char **argv) {
       .shadow_blacklist = NULL,
       .shadow_ignore_shaped = false,
       .respect_prop_shadow = false,
+      .xinerama_shadow_crop = false,
 
       .wintype_fade = { false },
       .fade_in_step = 0.028 * OPAQUE,
@@ -6594,6 +6758,7 @@ session_init(session_t *ps_old, int argc, char **argv) {
     | ExposureMask
     | StructureNotifyMask
     | PropertyChangeMask);
+  XFlush(ps->dpy);
 
   ps->root_width = DisplayWidth(ps->dpy, ps->scr);
   ps->root_height = DisplayHeight(ps->dpy, ps->scr);
@@ -6639,11 +6804,11 @@ session_init(session_t *ps_old, int argc, char **argv) {
   get_cfg(ps, argc, argv, false);
 
   // Query X RandR
-  if (ps->o.sw_opti && !ps->o.refresh_rate) {
+  if ((ps->o.sw_opti && !ps->o.refresh_rate) || ps->o.xinerama_shadow_crop) {
     if (XRRQueryExtension(ps->dpy, &ps->randr_event, &ps->randr_error))
       ps->randr_exists = true;
     else
-      printf_errf("(): No XRandR extension, automatic refresh rate "
+      printf_errf("(): No XRandR extension, automatic screen change "
           "detection impossible.");
   }
 
@@ -6661,6 +6826,17 @@ session_init(session_t *ps_old, int argc, char **argv) {
     }
     if (!ps->dbe_exists)
       ps->o.dbe = false;
+  }
+
+  // Query X Xinerama extension
+  if (ps->o.xinerama_shadow_crop) {
+#ifdef CONFIG_XINERAMA
+    int xinerama_event = 0, xinerama_error = 0;
+    if (XineramaQueryExtension(ps->dpy, &xinerama_event, &xinerama_error))
+      ps->xinerama_exists = true;
+#else
+    printf_errf("(): Xinerama support not compiled in.");
+#endif
   }
 
   rebuild_screen_reg(ps);
@@ -6693,9 +6869,17 @@ session_init(session_t *ps_old, int argc, char **argv) {
   if (ps->o.sw_opti)
     ps->o.sw_opti = swopti_init(ps);
 
+  // Monitor screen changes if vsync_sw is enabled and we are using
+  // an auto-detected refresh rate, or when Xinerama features are enabled
+  if (ps->randr_exists && ((ps->o.sw_opti && !ps->o.refresh_rate)
+        || ps->o.xinerama_shadow_crop))
+    XRRSelectInput(ps->dpy, ps->root, RRScreenChangeNotifyMask);
+
   // Initialize VSync
   if (!vsync_init(ps))
     exit(1);
+
+  cxinerama_upd_scrs(ps);
 
   // Create registration window
   if (!ps->reg_win && !register_cm(ps))
@@ -6741,10 +6925,11 @@ session_init(session_t *ps_old, int argc, char **argv) {
   }
 
   fds_insert(ps, ConnectionNumber(ps->dpy), POLLIN);
+  ps->tmout_unredir = timeout_insert(ps, ps->o.unredir_if_possible_delay,
+      tmout_unredir_callback, NULL);
+  ps->tmout_unredir->enabled = false;
 
   XGrabServer(ps->dpy);
-
-  redir_start(ps);
 
   {
     Window root_return, parent_return;
@@ -6854,6 +7039,7 @@ session_destroy(session_t *ps) {
   free_wincondlst(&ps->o.blur_background_blacklist);
   free_wincondlst(&ps->o.opacity_rules);
   free_wincondlst(&ps->o.paint_blacklist);
+  free_wincondlst(&ps->o.unredir_if_possible_blacklist);
 #endif
 
   // Free tracked atom list
@@ -6923,6 +7109,7 @@ session_destroy(session_t *ps) {
   free(ps->pfds_read);
   free(ps->pfds_write);
   free(ps->pfds_except);
+  free_xinerama_info(ps);
 
 #ifdef CONFIG_VSYNC_OPENGL
   glx_destroy(ps);
@@ -6958,6 +7145,7 @@ session_destroy(session_t *ps) {
   XSync(ps->dpy, True);
 
   // Free timeouts
+  ps->tmout_unredir = NULL;
   timeout_clear(ps);
 
   if (ps == ps_g)
@@ -7012,6 +7200,7 @@ session_run(session_t *ps) {
     ps->idling = true;
 
     t = paint_preprocess(ps, ps->list);
+    ps->tmout_unredir_hit = false;
 
     // If the screen is unredirected, free all_damage to stop painting
     if (!ps->redirected || ON == ps->o.stoppaint_force)

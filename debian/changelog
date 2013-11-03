@@ -2,6 +2,7 @@ compton (0.1~beta2-1) unstable; urgency=low
 
   * New upstream release, 0.1~beta2.
   * Drop unnecessary dependency on hardening-wrapper.
+  * Add libxinerama-dev dependency due to upstream changes.
   * Change licence tag to Expat.
   * Update patches.
 

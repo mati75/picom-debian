@@ -1,0 +1,59 @@
+From: Scott Leggett <scott@sl.id.au>
+Date: Sun, 3 Nov 2013 19:47:34 +1100
+Subject: Don't install .desktop file.
+
+---
+ Makefile        |    5 +----
+ compton.desktop |   11 -----------
+ 2 files changed, 1 insertion(+), 15 deletions(-)
+ delete mode 100644 compton.desktop
+
+diff --git a/Makefile b/Makefile
+index 701308b..d480c6a 100644
+--- a/Makefile
++++ b/Makefile
+@@ -6,7 +6,6 @@ CC ?= gcc
+ PREFIX ?= /usr
+ BINDIR ?= $(PREFIX)/bin
+ MANDIR ?= $(PREFIX)/share/man/man1
+-APPDIR ?= $(PREFIX)/share/applications
+ 
+ PACKAGES = x11 xcomposite xfixes xdamage xrender xext xrandr
+ LIBS = -lm -lrt
+@@ -126,10 +125,9 @@ man/%.1.html: man/%.1.asciidoc
+ docs: $(MANPAGES) $(MANPAGES_HTML)
+ 
+ install: $(BINS) docs
+-	@install -d "$(DESTDIR)$(BINDIR)" "$(DESTDIR)$(MANDIR)" "$(DESTDIR)$(APPDIR)"
++	@install -d "$(DESTDIR)$(BINDIR)" "$(DESTDIR)$(MANDIR)"
+ 	@install -m755 $(BINS) "$(DESTDIR)$(BINDIR)"/ 
+ 	@install -m644 $(MANPAGES) "$(DESTDIR)$(MANDIR)"/
+-	@install -m644 compton.desktop "$(DESTDIR)$(APPDIR)"/
+ ifneq "$(DOCDIR)" ""
+ 	@install -d "$(DESTDIR)$(DOCDIR)"
+ 	@install -m644 README.md compton.sample.conf "$(DESTDIR)$(DOCDIR)"/
+@@ -139,7 +137,6 @@ endif
+ uninstall:
+ 	@rm -f "$(DESTDIR)$(BINDIR)/compton" "$(DESTDIR)$(BINDIR)/compton-trans"
+ 	@rm -f $(addprefix "$(DESTDIR)$(MANDIR)"/, compton.1 compton-trans.1)
+-	@rm -f "$(DESTDIR)$(APPDIR)/compton.desktop"
+ ifneq "$(DOCDIR)" ""
+ 	@rm -f $(addprefix "$(DESTDIR)$(DOCDIR)"/, README.md compton.sample.conf cdbus-driver.sh)
+ endif
+diff --git a/compton.desktop b/compton.desktop
+deleted file mode 100644
+index 4a2875f..0000000
+--- a/compton.desktop
++++ /dev/null
+@@ -1,11 +0,0 @@
+-[Desktop Entry]
+-Version=1.0
+-Type=Application
+-Name=compton
+-GenericName=X compositor
+-Comment=A X compositor
+-Categories=Utility;
+-TryExec=compton
+-Exec=compton
+-# Icon=xcompmgr
+-# Thanks to quequotion for providing this file!

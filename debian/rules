@@ -1,7 +1,8 @@
 #!/usr/bin/make -f
 
 # Set binary version
-export COMPTON_VERSION = 0.1~beta2
+include /usr/share/dpkg/pkg-info.mk
+export COMPTON_VERSION = $(DEB_VERSION_UPSTREAM)
 
 %:
 	dh $@

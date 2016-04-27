@@ -23,7 +23,7 @@ Build-Depends:
  libxrender-dev,
  pkg-config,
  xsltproc
-Standards-Version: 3.9.4
+Standards-Version: 3.9.7
 Homepage: https://github.com/chjj/compton
 Vcs-Git: https://gitlab.com/smlx/compton.git
 Vcs-Browser: https://gitlab.com/smlx/compton

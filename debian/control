@@ -25,8 +25,8 @@ Build-Depends:
  xsltproc
 Standards-Version: 3.9.4
 Homepage: https://github.com/chjj/compton
-Vcs-Git: git://github.com/smlx/package-compton.git
-Vcs-Browser: https://github.com/smlx/package-compton
+Vcs-Git: https://gitlab.com/smlx/compton.git
+Vcs-Browser: https://gitlab.com/smlx/compton
 
 Package: compton
 Architecture: any

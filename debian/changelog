@@ -1,3 +1,17 @@
+compton (0.1~beta2+20150922-1) unstable; urgency=low
+
+  * Update to upstream git snapshot (v0.1_beta2-83-g2343e4b)
+  * Remove old patches which no longer apply.
+  * Update package VCS URLs.
+  * Bump Standards-Version from 3.9.4 to 3.9.7.
+  * Update copyright holder information.
+  * Set hardcoded version string to that in debian/changelog.
+  * Enable all hardening build options.
+  * Add patch for keywords entry in .desktop file.
+  * Patch bashism in compton-trans script. (Closes: #772216)
+
+ -- Scott Leggett <scott@sl.id.au>  Wed, 27 Apr 2016 14:39:44 +1000
+
 compton (0.1~beta2-1) unstable; urgency=low
 
   * New upstream release, 0.1~beta2.

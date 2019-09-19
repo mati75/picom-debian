@@ -1,3 +1,11 @@
+compton (7.3-0.1) UNRELEASED; urgency=low
+
+  * Move to a different, maintained upstream,
+    https://github.com/yshui/compton/
+  * New upstream release, 7.3.
+
+ -- Tomas Janousek <tomi@nomi.cz>  Thu, 19 Sep 2019 15:52:08 +0200
+
 compton (0.1~beta2+20150922-1) unstable; urgency=low
 
   * Update to upstream git snapshot (v0.1_beta2-83-g2343e4b)

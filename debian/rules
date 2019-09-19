@@ -2,9 +2,8 @@
 
 export DEB_BUILD_MAINT_OPTIONS = hardening=+all
 
-# Set binary version
-include /usr/share/dpkg/pkg-info.mk
-export COMPTON_VERSION = $(DEB_VERSION_UPSTREAM)
-
 %:
 	dh $@
+
+override_dh_auto_configure:
+	dh_auto_configure -- -Dbuild_docs=true

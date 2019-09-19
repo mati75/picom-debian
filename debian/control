@@ -24,7 +24,7 @@ Build-Depends:
  pkg-config,
  xsltproc
 Standards-Version: 3.9.7
-Homepage: https://github.com/chjj/compton
+Homepage: https://github.com/yshui/compton
 Vcs-Git: https://gitlab.com/smlx/compton.git
 Vcs-Browser: https://gitlab.com/smlx/compton
 

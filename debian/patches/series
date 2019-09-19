@@ -1,1 +1,2 @@
 0001-Add-Keywords-entry-to-.desktop-file.patch
+0002-fix-a-few-memory-leaks-reported-by-valgrind.patch

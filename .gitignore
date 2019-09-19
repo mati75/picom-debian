@@ -2,8 +2,6 @@
 .deps
 aclocal.m4
 autom4te.cache
-config.h
-config.h.in
 config.log
 config.status
 configure
@@ -14,6 +12,8 @@ stamp-h1
 compton
 *.o
 build/
+compile_commands.json
+build.ninja
 
 # CMake files
 compton-*.deb
@@ -47,3 +47,4 @@ doxygen/
 .ycm_extra_conf.pyc
 /src/backtrace-symbols.[ch]
 /compton*.trace
+*.orig

@@ -1,123 +1,115 @@
-# Compton
+Compton
+=======
 
-[![Join the chat at https://gitter.im/chjj/compton](https://badges.gitter.im/Join%20Chat.svg)](https://gitter.im/chjj/compton?utm_source=badge&utm_medium=badge&utm_campaign=pr-badge&utm_content=badge)
+This is forked from the original Compton because that seems to have become unmaintained.
 
-__Compton__ is a compositor for X, and a fork of __xcompmgr-dana__.
+The current battle plan of this fork is to refactor it to make the code _possible_ to maintain, so potential contributors won't be scared away when they take a look at the code.
 
-I was frustrated by the low amount of standalone lightweight compositors.
-Compton was forked from Dana Jansens' fork of xcompmgr and refactored.  I fixed
-whatever bug I found, and added features I wanted. Things seem stable, but don't
-quote me on it. I will most likely be actively working on this until I get the
-features I want. This is also a learning experience for me. That is, I'm
-partially doing this out of a desire to learn Xlib.
+We also try to fix bugs.
 
-## Changes from xcompmgr:
+The original README can be found [here](README_orig.md)
 
-* OpenGL backend (`--backend glx`), in addition to the old X Render backend.
-* Inactive window transparency (`-i`) / dimming (`--inactive-dim`).
-* Titlebar/frame transparency (`-e`).
-* Menu transparency (`-m`, thanks to Dana).
-* shadows are now enabled for argb windows, e.g. terminals with transparency
-* removed serverside shadows (and simple compositing) to clean the code,
-  the only option that remains is clientside shadows
-* configuration files (see the man page for more details)
-* colored shadows (`--shadow-[red/green/blue]`)
-* a new fade system
-* VSync support (not always working)
-* Blur of background of transparent windows, window color inversion (bad in performance)
-* Some more options...
+## Call for testers
 
-## Fixes from the original xcompmgr:
+### `--experimental-backends`
 
-* fixed a segfault when opening certain window types
-* fixed a memory leak caused by not freeing up shadows (from the freedesktop
-  repo)
-* fixed the conflict with chromium and similar windows
-* [many more](https://github.com/chjj/compton/issues)
+This flag enables the refactored/partially rewritten backends.
 
-## Building
+Currently new backends features better vsync with the xrender backend, improved input lag with the glx backend (for non-NVIDIA users). The performance should be on par with the old backends.
 
-### Dependencies:
+New backend features will only be implemented on the new backends from now on, and the old backends will eventually be phased out after the new backends stabilizes.
 
-__B__ for build-time
+To test the new backends, add the `--experimental-backends` flag to the command line you used to run compton. This flag is not available from the configuration file.
 
-__R__ for runtime
+To report issues with the new backends, please state explicitly you are using the new backends in your report.
 
-* libx11 (B,R)
-* libxcomposite (B,R)
-* libxdamage (B,R)
-* libxfixes (B,R)
-* libXext (B,R)
-* libxrender (B,R)
-* libXrandr (B,R)
-* libXinerama (B,R) (Can be disabled with `NO_XINERAMA` at compile time)
-* pkg-config (B)
-* make (B)
-* xproto / x11proto (B)
-* sh (R)
-* xprop,xwininfo / x11-utils (R)
-* libpcre (B,R) (Can be disabled with `NO_REGEX_PCRE` at compile time)
-* libconfig (B,R) (Can be disabled with `NO_LIBCONFIG` at compile time)
-* libdrm (B) (Can be disabled with `NO_VSYNC_DRM` at compile time)
-* libGL (B,R) (Can be disabled with `NO_VSYNC_OPENGL` at compile time)
-* libdbus (B,R) (Can be disabled with `NO_DBUS` at compile time)
-* asciidoc (B) (and docbook-xml-dtd-4.5, libxml-utils, libxslt, xsltproc, xmlto, etc. if your distro doesn't pull them in)
+## Change Log
 
-### How to build
+See [Releases](https://github.com/yshui/compton/releases)
 
-To build, make sure you have the dependencies above:
+## Build
 
-```bash
-# Make the main program
-$ make
-# Make the man pages
-$ make docs
-# Install
-$ make install
+### Dependencies
+
+Assuming you already have all the usual building tools installed (e.g. gcc, python, meson, ninja, etc.), you still need:
+
+* libx11
+* libx11-xcb
+* libXext
+* xproto
+* xcb
+* xcb-damage
+* xcb-xfixes
+* xcb-shape
+* xcb-renderutil
+* xcb-render
+* xcb-randr
+* xcb-composite
+* xcb-image
+* xcb-present
+* xcb-xinerama
+* pixman
+* libdbus (optional, disable with the `-Ddbus=false` meson configure flag)
+* libconfig (optional, disable with the `-Dconfig_file=false` meson configure flag)
+* libxdg-basedir (optional, disable with the `-Dconfig_file=false` meson configure flag)
+* libGL (optional, disable with the `-Dopengl=false` meson configure flag)
+* libpcre (optional, disable with the `-Dregex=false` meson configure flag)
+* libev
+* uthash
+
+On Debian based distributions (e.g. Ubuntu), the list of needed packages are
+
+```
+libxext-dev libxcb1-dev libxcb-damage0-dev libxcb-xfixes0-dev libxcb-shape0-dev libxcb-render-util0-dev libxcb-render0-dev libxcb-randr0-dev libxcb-composite0-dev libxcb-image0-dev libxcb-present-dev libxcb-xinerama0-dev libpixman-1-dev libdbus-1-dev libconfig-dev libxdg-basedir-dev libgl1-mesa-dev  libpcre2-dev  libevdev-dev uthash-dev libevdev2
 ```
 
-(Compton does include a `_CMakeLists.txt` in the tree, but we haven't decided whether we should switch to CMake yet. The `Makefile` is fully usable right now.)
+To build the documents, you need `asciidoc`
 
-## Known issues
+### To build
 
-* Our [FAQ](https://github.com/chjj/compton/wiki/faq) covers some known issues.
+```bash
+$ git submodule update --init --recursive
+$ meson --buildtype=release . build
+$ ninja -C build
+```
 
-* VSync does not work too well. You may check the [VSync Guide](https://github.com/chjj/compton/wiki/vsync-guide) for how to get (possibly) better effects.
+Built binary can be found in `build/src`
 
-* If `--unredir-if-possible` is enabled, when compton redirects/unredirects windows, the screen may flicker. Using `--paint-on-overlay` minimizes the problem from my observation, yet I do not know if there's a cure.
+If you have libraries and/or headers installed at non-default location (e.g. under `/usr/local/`), you might need to tell meson about them, since meson doesn't look for dependencies there by default.
 
-* compton may not track focus correctly in all situations. The focus tracking code is experimental. `--use-ewmh-active-win` might be helpful.
+You can do that by setting the `CPPFLAGS` and `LDFLAGS` environment variables when running `meson`. Like this:
 
-* The performance of blur under X Render backend might be pretty bad. OpenGL backend could be faster.
+```bash
+$ LDFLAGS="-L/path/to/libraries" CPPFLAGS="-I/path/to/headers" meson --buildtype=release . build
 
-* With `--blur-background` you may sometimes see weird lines around damaged area. `--resize-damage YOUR_BLUR_RADIUS` might be helpful in the case.
+```
 
-## Usage
+As an example, on FreeBSD, you might have to run meson with:
+```bash
+$ LDFLAGS="-L/usr/local/include" CPPFLAGS="-I/usr/local/include" meson --buildtype=release . build
+$ ninja -C build
+```
 
-Please refer to the Asciidoc man pages (`man/compton.1.asciidoc` & `man/compton-trans.1.asciidoc`) for more details and examples.
+### To install
 
-Note a sample configuration file `compton.sample.conf` is included in the repository.
+``` bash
+$ ninja -C build install
+```
 
-## Support
+Default install prefix is `/usr/local`, you can change it with `meson configure -Dprefix=<path> build`
 
-* Bug reports and feature requests should go to the "Issues" section above.
+## How to Contribute
 
-* Our (semi?) official IRC channel is #compton on FreeNode.
+### Code
 
-* Some information is available on the wiki, including [FAQ](https://github.com/chjj/compton/wiki/faq), [VSync Guide](https://github.com/chjj/compton/wiki/vsync-guide), and [Performance Guide](https://github.com/chjj/compton/wiki/perf-guide).
+You can look at the [Projects](https://github.com/yshui/compton/projects) page, and see if there is anything interests you. Or you can take a look at the [Issues](https://github.com/yshui/compton/issues).
 
-## License
+### Non-code
 
-Although compton has kind of taken on a life of its own, it was originally
-an xcompmgr fork. xcompmgr has gotten around. As far as I can tell, the lineage
-for this particular tree is something like:
+Even if you don't want to contribute code, you can still contribute by compiling and running this branch, and report any issue you can find.
 
-* Keith Packard (original author)
-* Matthew Hawn
-* ...
-* Dana Jansens
-* chjj and richardgv
+Contributions to the documents and wiki will also be appreciated.
 
-Not counting the tens of people who forked it in between.
+## Contributors
 
-Compton is distributed under MIT license, as far as I (richardgv) know. See LICENSE for more info.
+See [CONTRIBUTORS](CONTRIBUTORS)
